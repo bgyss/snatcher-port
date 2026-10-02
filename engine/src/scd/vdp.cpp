@@ -1,5 +1,6 @@
 #include "vdp.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -12,6 +13,18 @@ int layer_mask() {
 }  // namespace
 
 namespace scd {
+
+uint32_t current_pc_for_debug();
+
+namespace {
+uint32_t g_watch_lo = 1, g_watch_hi = 0;
+void init_watch() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    if (const char* s = std::getenv("SCD_VRAMWATCH")) std::sscanf(s, "%x-%x", &g_watch_lo, &g_watch_hi);
+}
+}  // namespace
 
 Vdp::Vdp() { reset(); }
 
@@ -74,6 +87,9 @@ uint16_t Vdp::read_hv(int line, int cycle_in_line, int cycles_per_line) {
 }
 
 void Vdp::write_word(uint16_t v) {
+    init_watch();
+    if ((code_ & 0x0F) == 1 && addr_ >= g_watch_lo && addr_ <= g_watch_hi)
+        std::fprintf(stderr, "[vram] pc=%06x addr=%04x val=%04x (line %d)\n", current_pc_for_debug(), addr_, v, cur_line_);
     switch (code_ & 0x0F) {
         case 0x01:
             if (addr_ & 1) v = uint16_t(v << 8 | v >> 8);
@@ -88,6 +104,7 @@ void Vdp::write_word(uint16_t v) {
 }
 
 void Vdp::write_data(uint16_t v) {
+    if (std::getenv("SCD_VDPPORT")) std::fprintf(stderr, "D %04x pc=%06x\n", v, current_pc_for_debug());
     cmd_pending_ = false;
     if (dma_fill_pending_) {
         dma_fill_pending_ = false;
@@ -98,6 +115,7 @@ void Vdp::write_data(uint16_t v) {
 }
 
 void Vdp::write_ctrl(uint16_t v) {
+    if (std::getenv("SCD_VDPPORT")) std::fprintf(stderr, "C %04x pc=%06x\n", v, current_pc_for_debug());
     if (cmd_pending_) {
         cmd_pending_ = false;
         code_ = uint8_t((code_ & 0x03) | ((v >> 2) & 0x3C));
@@ -137,8 +155,13 @@ void Vdp::do_dma() {
     if (std::getenv("SCD_VDPLOG"))
         std::fprintf(stderr, "[vdp dma] line %d code=%02x addr=%04x src=%06x len=%u\n", cur_line_, code_, addr_, src << 1, len);
     uint32_t a = src << 1;
+    // Sega CD: a DMA that reads Word RAM is one word late: the first word written is stale and the last
+    // source word is never transferred. The IP compensates (source + 2, plus a fix-up write after the DMA).
+    const bool word_ram_src = a >= 0x200000 && a < 0x240000;
+    uint16_t delayed = 0;
     for (uint32_t i = 0; i < len; ++i) {
         uint16_t w = dma_read ? dma_read(a) : 0;
+        if (word_ram_src) std::swap(w, delayed);
         write_word(w);
         a = (a & 0xFE0000) | ((a + 2) & 0x1FFFF);
     }
@@ -353,6 +376,8 @@ done:;
 }
 
 void Vdp::render_line(int line) {
+    if (std::getenv("SCD_LINELOG") && line % 56 == 0)
+        std::fprintf(stderr, "[line %d] r0=%02x r1=%02x r11=%02x r12=%02x vs=%03x %03x %03x %03x %03x %03x\n", line, reg_[0], reg_[1], reg_[11], reg_[12], vsram_[0], vsram_[1], vsram_[2], vsram_[3], vsram_[4], vsram_[5]);
     const int w = width();
     uint32_t* dst = fb_ + line * 320;
     if (!display_enabled()) {

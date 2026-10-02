@@ -49,3 +49,17 @@ Architecture decision: see `docs/ADR-001-engine-architecture.md`. Facts recovere
   nested V-INT handler; with simultaneous flag and interrupt it livelocks (checked against MAME's per-frame `e028/e022/e020` state, `tools/emu/trace_state.lua`).
 - Own HLE stack area lives below `$5F00`; a CDBSTAT buffer placed inside the stack corrupted return addresses (fixed: `$5000`).
 - Status: boots to the Konami logo, then to the backup-RAM device selection screen. Text on that screen is garbled (investigating).
+
+### Title screen bit-exact (2026-10-02)
+
+- Reaches the title screen; a headless frame at `$FFE020 == 0x600` is **100.00% pixel-identical** to MAME (levels compared after mapping MAME's DAC ramp).
+  Oracle tooling: `tools/emu/dump_wordram.lua` (screen, Word RAM, Main RAM, state), `tools/emu/vdp_ctrl_log.lua` (Main CPU VDP port words).
+  Taps must be installed after the BIOS hands over (it remaps the Main CPU space).
+- **Word RAM DMA quirk**: a 68K->VRAM DMA whose source is Word RAM (`0x200000-0x23FFFF`) is one word late. The first word written is stale and the last source word is
+  never transferred. The IP knows: it adds 2 to the source, then rewrites the first two words with `move.l -2(a4),-4(a5)` after the DMA (it picks the Word RAM variant by testing
+  bit 5 of the source's high word). Implemented in `Vdp::do_dma`. Beware: a MAME savestate's VRAM array looked shifted by a word and misled the first fit.
+- The Main-side `_BURAM` (`jsr $FFFDAE`) only drives the **RAM cartridge**; with no cartridge it must return carry set, `d0 = d1 = 0` for INIT and `$FFFF` for the rest.
+  Returning success made the Sub overlay show the "which RAM do you use" device screen.
+- A 100 KB overlay at disc LBA 909 (outside the ISO file list) is loaded to PRG RAM `$28000` after the Konami logo. It contains Sub-CPU code (backup RAM menu, title logic)
+  and the compressed title graphics. Konami's LZ decompressor for Main-side graphics is at Main `$FF1996` (flag-byte LZ; literal / short back-reference / long run), driven by the
+  DMA queue handler at `$FF17F2`-`$FF18E2` (queue entries of 12 bytes at `$FFBA00`: type, source, destination, length).

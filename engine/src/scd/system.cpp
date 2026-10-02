@@ -72,6 +72,8 @@ int scd_int_ack(int level) { return System::instance().int_ack(level); }
 void scd_instruction_hook(unsigned int pc) { System::instance().trace_pc(pc); }
 }
 
+uint32_t current_pc_for_debug() { return m68k_get_reg(nullptr, M68K_REG_PPC) & 0xFFFFFF; }
+
 System& System::instance() {
     static System s;
     return s;
@@ -713,8 +715,17 @@ int System::illegal(int opcode) {
             m68k_end_timeslice();
             break;
         case kTrapCdbios: cdbios(int(reg_get(M68K_REG_D0) & 0xFFFF)); break;
-        case kTrapBuram:
-        case kTrapMainBuram: buram(int(reg_get(M68K_REG_D0) & 0xFFFF)); break;
+        case kTrapBuram: buram(int(reg_get(M68K_REG_D0) & 0xFFFF)); break;
+        case kTrapMainBuram: {
+            // The Main-side _BURAM ($FFFDAE) drives the RAM cartridge, which is never present.
+            int fn = int(reg_get(M68K_REG_D0) & 0xFFFF);
+            if (trace_bios_) log("MAIN BURAM %02x (no cartridge)\n", fn);
+            uint32_t d0 = fn == 0 ? 0 : 0xFFFF, d1 = fn == 0 ? 0 : 0xFFFF;
+            reg_set(M68K_REG_D0, d0);
+            reg_set(M68K_REG_D1, d1);
+            set_carry(true);
+            break;
+        }
     }
     return 1;
 }
@@ -934,13 +945,13 @@ int System::bram_find(const uint8_t* name) const {
 
 void System::buram(int fn) {
     const uint32_t a0 = reg_get(M68K_REG_A0), a1 = reg_get(M68K_REG_A1), d1 = reg_get(M68K_REG_D1);
-    if (trace_bios_) log("BURAM %02x a0=%06x a1=%06x d1=%08x\n", fn, a0, a1, d1);
+    if (trace_bios_) log("BURAM %02x a0=%06x a1=%06x d1=%08x ret=%06x (frame %llu)\n", fn, a0, a1, d1, (read16(reg_get(M68K_REG_SP)) << 16 | read16(reg_get(M68K_REG_SP) + 2)) & 0xFFFFFF, (unsigned long long)frames_);
     if (bram_files_.empty() && std::memcmp(bram_ + kBramHeader + 0x20, kBramMagic, 11) != 0) bram_load();
     auto read_name = [&](uint32_t a, uint8_t* n) { for (int i = 0; i < 11; ++i) n[i] = uint8_t(read8(a + i)); };
     switch (fn) {
         case 0: {  // BRMINIT
-            for (int i = 0; i < 16; ++i) write8(a1 + i, "SEGA_CD_ROM\0\0\0\0\0"[i]);
-            reg_set(M68K_REG_D0, kBramSize);
+            for (int i = 0; i < 12; ++i) write8(a1 + i, "SEGA_CD_ROM"[i]);
+            reg_set(M68K_REG_D0, kBramSize >> 13);  // capacity in 8 KB units
             set_carry(false);
             break;
         }

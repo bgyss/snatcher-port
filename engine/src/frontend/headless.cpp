@@ -104,6 +104,11 @@ int main(int argc, char** argv) {
             const uint8_t* p = sys.prg_ram();
             std::printf("%d e028=%02x e022=%04x e020=%04x s7840=%04x\n", f + 1, m[0xE028], m[0xE022] << 8 | m[0xE023], m[0xE020] << 8 | m[0xE021], p[0x7840] << 8 | p[0x7841]);
         }
+        if (const char* s = std::getenv("SCD_STOP_E020")) {
+            const uint8_t* m = sys.main_ram();
+            unsigned e20 = m[0xE020] << 8 | m[0xE021], e22 = m[0xE022] << 8 | m[0xE023];
+            if (e20 >= std::strtoul(s, nullptr, 16) && e22 >= 3 && e22 < 0x100) break;
+        }
         if (ppm_every && f % ppm_every == 0) {
             char name[64];
             std::snprintf(name, sizeof name, "/frame_%05d.ppm", f);
@@ -112,6 +117,12 @@ int main(int argc, char** argv) {
     }
     if (std::getenv("SCD_DEBUG")) sys.dump_state();
     if (profile_from >= 0) sys.dump_profile(12);
+    if (std::getenv("SCD_DUMP_RAM")) {
+        auto dump = [&](const char* n, const uint8_t* p, size_t len) { FILE* f = std::fopen((out + n).c_str(), "wb"); std::fwrite(p, 1, len, f); std::fclose(f); };
+        dump("/main_ram.bin", sys.main_ram(), 0x10000);
+        dump("/prg_ram.bin", sys.prg_ram(), 0x80000);
+        dump("/word_ram.bin", sys.word_ram(), 0x40000);
+    }
     if (std::getenv("SCD_VRAM")) {
         FILE* f = std::fopen((out + "/vram.bin").c_str(), "wb");
         std::fwrite(sys.vdp().vram(), 1, 0x10000, f);
