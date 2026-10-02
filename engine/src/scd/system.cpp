@@ -829,10 +829,13 @@ void System::cdbios(int fn) {
             std::memset(st, 0, 0x20);
             put32(st + 8, 0xFFFFFFFF);
             put32(st + 12, 0xFFFFFFFF);
+            put16(st + 0, 0x0500);
             if (cdda_playing_) {
+                uint32_t cur = cdda_lba_ ? cdda_lba_ - 1 : 0, abs_t = cur + 150;
+                uint32_t rel = cur - disc_->tracks()[cdda_track_ - 1].start_lba;
                 put16(st + 0, 0x0100);
-                put32(st + 8, (uint32_t(bcd((cdda_lba_ + 150) / 75 / 60)) << 16) | (bcd((cdda_lba_ + 150) / 75 % 60) << 8) | bcd((cdda_lba_ + 150) % 75));
-                put32(st + 12, uint32_t(cdda_track_) << 24);
+                put32(st + 8, (uint32_t(bcd(abs_t / 75 / 60)) << 24) | (bcd(abs_t / 75 % 60) << 16) | (bcd(abs_t % 75) << 8));
+                put32(st + 12, (uint32_t(bcd(rel / 75 / 60)) << 24) | (bcd(rel / 75 % 60) << 16) | (bcd(rel % 75) << 8));
             }
             reg_set(M68K_REG_A0, kCdbstatArea);
             set_carry(false);

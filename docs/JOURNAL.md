@@ -63,3 +63,8 @@ Architecture decision: see `docs/ADR-001-engine-architecture.md`. Facts recovere
 - A 100 KB overlay at disc LBA 909 (outside the ISO file list) is loaded to PRG RAM `$28000` after the Konami logo. It contains Sub-CPU code (backup RAM menu, title logic)
   and the compressed title graphics. Konami's LZ decompressor for Main-side graphics is at Main `$FF1996` (flag-byte LZ; literal / short back-reference / long run), driven by the
   DMA queue handler at `$FF17F2`-`$FF18E2` (queue entries of 12 bytes at `$FFBA00`: type, source, destination, length).
+
+### Intro reached (2026-10-02)
+- Reporting `CDBSTAT` honestly (status `$0100` + advancing absolute/track MSF while CD-DA plays, `$0500` idle) removed the Main-CPU crash after QUIT: the game now runs title -> options -> story text -> "Moscow: June 6, 1996" -> first in-game screen, with audio.
+- Mac app: `tools/package/mac_app.sh` -> `dist/Snatcher.app` (arm64, bundles SDL3). Windows: CI workflow only (untested).
+- Open: audio levels clip (YM/PCM scaling), PCM voice streaming and CD-DA unverified vs MAME, saves untested, no light-gun input.
