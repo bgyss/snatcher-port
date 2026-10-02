@@ -18,3 +18,5 @@ ghidra/*.rep/
 __pycache__/
 *.pyc
 ghidra/*.lock*
+.venv/
+engine/build*/
