@@ -85,6 +85,7 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     disc_ = std::move(disc);
     save_path_ = save_path;
     trace_bios_ = std::getenv("SCD_TRACE_BIOS") != nullptr;
+    trace_audio_ = std::getenv("SCD_TRACE_AUDIO") != nullptr;
     if (const char* w = std::getenv("SCD_STACKAT")) stack_at_ = uint32_t(std::strtoul(w, nullptr, 16));
     if (const char* w = std::getenv("SCD_WATCH")) watch_ = uint32_t(std::strtoul(w, nullptr, 16));
 
@@ -309,6 +310,8 @@ void System::trace_pc(uint32_t pc) {
 
 int System::int_ack(int level) {
     if (cur_ == kMain) {
+        if (trace_bios_ && level == 4) log("[hint] frame %llu line %d vec=%04x e06c=%02x%02x e034=%02x%02x r0=%02x ef00=%02x%02x\n", (unsigned long long)frames_, line_, hint_vec_, main_ram_[0xe06c], main_ram_[0xe06d], main_ram_[0xe034], main_ram_[0xe035], vdp_.reg(0), main_ram_[0xef00], main_ram_[0xef01]);
+        if (trace_bios_ && level == 6) log("[vint] frame %llu line %d e06c=%02x%02x e062=%02x%02x r0=%02x ef00=%02x%02x e028=%02x\n", (unsigned long long)frames_, line_, main_ram_[0xe06c], main_ram_[0xe06d], main_ram_[0xe062], main_ram_[0xe063], vdp_.reg(0), main_ram_[0xef00], main_ram_[0xef01], main_ram_[0xe028]);
         if (level == 6 || level == 4) vdp_.irq_ack(level);
         else if (level == 2) main_int2_pending_ = false;
         refresh_irq(kMain);
@@ -320,6 +323,7 @@ int System::int_ack(int level) {
 }
 
 void System::advance_sub_time(int cycles) {
+    sub_cycles_ += uint64_t(cycles);
     sub_tick_accum_ += cycles;
     while (sub_tick_accum_ >= 384) {
         sub_tick_accum_ -= 384;
@@ -335,7 +339,7 @@ void System::advance_sub_time(int cycles) {
 }
 
 void System::run_cpu(Cpu c, int cycles) {
-    if (c == kSub && !sub_run_) {
+    if (c == kSub && (!sub_run_ || sub_wait_vsync_)) {
         advance_sub_time(cycles);
         return;
     }
@@ -355,6 +359,7 @@ void System::run_frame() {
     const int active = vdp_.active_lines();
     for (line_ = 0; line_ < kLines; ++line_) {
         vdp_.begin_line(line_);
+        if (line_ == active) sub_wait_vsync_ = false;
         refresh_irq(kMain);
         for (int s = 0; s < kSlices; ++s) {
             main_cycle_in_line_ = s * (kMainPerLine / kSlices);
@@ -485,8 +490,10 @@ void System::main_write16(uint32_t a, uint32_t v) {
     if (a >= 0xC00000 && a < 0xE00000) {
         uint32_t r = a & 0x1F;
         if (r < 4) vdp_.write_data(uint16_t(v));
-        else if (r < 8) vdp_.write_ctrl(uint16_t(v));
-        else if (r >= 0x10 && r < 0x18) psg_.write(uint8_t(v));
+        else if (r < 8) {
+            vdp_.write_ctrl(uint16_t(v));
+            if (int stall = vdp_.take_dma_stall()) m68k_modify_timeslice(-stall);
+        } else if (r >= 0x10 && r < 0x18) psg_.write(uint8_t(v));
         return;
     }
     main_write8(a, v >> 8);
@@ -670,7 +677,11 @@ void System::io_write(uint32_t reg, uint8_t v) {
     }
 }
 
-void System::ym_write(int port, uint8_t v) { OPN2_Write(&ym_, uint32_t(port), v); }
+void System::ym_write(int port, uint8_t v) {
+    ++ym_writes_;
+    if (trace_audio_) log("[ym] frame %llu port %d <- %02x\n", (unsigned long long)frames_, port, v);
+    OPN2_Write(&ym_, uint32_t(port), v);
+}
 
 // -------------------------------------------------------------- HLE BIOS
 
@@ -703,6 +714,9 @@ int System::illegal(int opcode) {
     }
     switch (id) {
         case kTrapWaitVsync:
+            sub_wait_vsync_ = true;
+            m68k_end_timeslice();
+            break;
         case kTrapSetJmp:
         case kTrapMainLicense:
             break;
@@ -733,6 +747,7 @@ int System::illegal(int opcode) {
 bool System::cdc_load_sector() {
     if (cdc_buf_valid_) return true;
     if (!cdc_reading_ || cdc_remaining_ == 0) return false;
+    if (sub_cycles_ < cdc_ready_at_) return false;
     if (!disc_->read_data(cdc_lba_, cdc_buf_)) {
         std::memset(cdc_buf_, 0, sizeof cdc_buf_);
     }
@@ -796,6 +811,12 @@ void System::cdbios(int fn) {
             cdc_lba_ = (uint32_t(sub_read8(a0)) << 24) | (sub_read8(a0 + 1) << 16) | (sub_read8(a0 + 2) << 8) | sub_read8(a0 + 3);
             cdc_remaining_ = (uint32_t(sub_read8(a0 + 4)) << 24) | (sub_read8(a0 + 5) << 16) | (sub_read8(a0 + 6) << 8) | sub_read8(a0 + 7);
             if (trace_bios_) log("  ROMREADN lba=%u count=%u (frame %llu)\n", cdc_lba_, cdc_remaining_, (unsigned long long)frames_);
+            {
+                // 1x drive: 75 sectors/s, plus a seek when the read is not a continuation of the last one.
+                const uint64_t per_sector = kSubClock / 75;
+                uint64_t seek = (cdc_lba_ == cdc_last_lba_ + 1) ? 0 : uint64_t(kSubClock) * 3 / 10;
+                cdc_ready_at_ = sub_cycles_ + seek + per_sector;
+            }
             cdc_reading_ = true;
             cdc_buf_valid_ = false;
             cdc_edt_ = cdc_dsr_ = false;
@@ -857,7 +878,9 @@ void System::cdbios(int fn) {
         case 0x8D:                                                             // CDCACK
             if (cdc_buf_valid_) {
                 cdc_buf_valid_ = false;
+                cdc_last_lba_ = cdc_lba_;
                 ++cdc_lba_;
+                cdc_ready_at_ = sub_cycles_ + kSubClock / 75;
                 if (cdc_remaining_ && --cdc_remaining_ == 0) cdc_reading_ = false;
             }
             cdc_edt_ = cdc_dsr_ = false;
@@ -1049,6 +1072,16 @@ void System::buram(int fn) {
     }
 }
 
+
+std::string System::comm_string() const {
+    char buf[16 * 5 + 8];
+    char* p = buf;
+    for (int i = 0; i < 16; ++i) {
+        const uint8_t* src = i < 8 ? cmd_ + i * 2 : stat_ + (i - 8) * 2;
+        p += std::snprintf(p, 8, "%02x%02x ", src[0], src[1]);
+    }
+    return std::string(buf);
+}
 
 void System::dump_state() {
     Cpu keep = cur_;

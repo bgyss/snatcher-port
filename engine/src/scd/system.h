@@ -44,6 +44,10 @@ public:
 
     // Debug.
     uint64_t frame_count() const { return frames_; }
+    uint8_t main_flag() const { return main_flag_; }
+    uint8_t sub_flag() const { return sub_flag_; }
+    std::string comm_string() const;
+    uint64_t ym_write_count() const { return ym_writes_; }
     bool halted() const { return halted_; }
     uint8_t* main_ram() { return main_ram_; }
     uint8_t* prg_ram() { return prg_ram_; }
@@ -177,6 +181,10 @@ private:
     uint32_t cdc_lba_ = 0;
     uint32_t cdc_remaining_ = 0;
     bool cdc_buf_valid_ = false;
+    uint64_t sub_cycles_ = 0;        // total Sub CPU cycles run (CD timing base)
+    uint64_t cdc_ready_at_ = 0;      // sub cycle when the next sector is deliverable
+    uint32_t cdc_last_lba_ = 0;
+    bool sub_wait_vsync_ = false;    // _WAITVSYNC: Sub CPU parked until the next V-blank
     uint8_t cdc_buf_[kUserData];
     uint8_t cdc_header_[4] = {};
     bool cdda_playing_ = false;
@@ -198,6 +206,8 @@ private:
 
     bool trace_bios_ = false;
     bool profile_ = false;
+    bool trace_audio_ = false;
+    uint64_t ym_writes_ = 0;
     uint32_t watch_ = 0, stack_at_ = 0;
     int stack_left_ = 20;
     int trace_cpu_ = -1, trace_left_ = 0;

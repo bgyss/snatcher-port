@@ -102,12 +102,28 @@ int main(int argc, char** argv) {
         if (std::getenv("SCD_STATE")) {
             const uint8_t* m = sys.main_ram();
             const uint8_t* p = sys.prg_ram();
-            std::printf("%d e028=%02x e022=%04x e020=%04x s7840=%04x\n", f + 1, m[0xE028], m[0xE022] << 8 | m[0xE023], m[0xE020] << 8 | m[0xE021], p[0x7840] << 8 | p[0x7841]);
+            std::printf("%d e022=%04x e06c=%04x e020=%04x f=%02x%02x comm=%s\n", f + 1, m[0xE022] << 8 | m[0xE023], m[0xE06C] << 8 | m[0xE06D], m[0xE020] << 8 | m[0xE021], sys.main_flag(), sys.sub_flag(), sys.comm_string().c_str()); (void)p;
         }
         if (const char* s = std::getenv("SCD_STOP_E020")) {
             const uint8_t* m = sys.main_ram();
             unsigned e20 = m[0xE020] << 8 | m[0xE021], e22 = m[0xE022] << 8 | m[0xE023];
             if (e20 >= std::strtoul(s, nullptr, 16) && e22 >= 3 && e22 < 0x100) break;
+        }
+        if (const char* ds = std::getenv("SCD_DUMP_AT")) {
+            for (const char* q = ds; *q;) {
+                char* e;
+                unsigned long v = std::strtoul(q, &e, 10);
+                if (e == q) break;
+                if (v == unsigned(f + 1)) {
+                    FILE* o = std::fopen((out + "/mainram_" + std::to_string(v) + ".bin").c_str(), "wb");
+                    std::fwrite(sys.main_ram(), 1, 0x10000, o);
+                    std::fclose(o);
+                    o = std::fopen((out + "/subram_" + std::to_string(v) + ".bin").c_str(), "wb");
+                    std::fwrite(sys.prg_ram() + 0x7000, 1, 0x6000, o);
+                    std::fclose(o);
+                }
+                q = *e ? e + 1 : e;
+            }
         }
         if (ppm_every && f % ppm_every == 0) {
             char name[64];
@@ -115,7 +131,7 @@ int main(int argc, char** argv) {
             write_ppm(out + name, sys.framebuffer(), sys.width(), sys.height());
         }
     }
-    if (std::getenv("SCD_DEBUG")) sys.dump_state();
+    if (std::getenv("SCD_DEBUG")) { sys.dump_state(); std::fprintf(stderr, "YM writes: %llu\n", (unsigned long long)sys.ym_write_count()); }
     if (profile_from >= 0) sys.dump_profile(12);
     if (std::getenv("SCD_DUMP_RAM")) {
         auto dump = [&](const char* n, const uint8_t* p, size_t len) { FILE* f = std::fopen((out + n).c_str(), "wb"); std::fwrite(p, 1, len, f); std::fclose(f); };

@@ -23,6 +23,8 @@ public:
 
     // Called once per scanline before CPU time runs for that line.
     void begin_line(int line);
+    // Main CPU cycles the last 68K->VDP DMA kept the bus busy (returned once).
+    int take_dma_stall() { int s = dma_stall_; dma_stall_ = 0; return s; }
     // Called ~110 Main CPU cycles into a line: the V-INT request trails the VBLANK flag.
     void line_progress();
     // Renders one active line into the framebuffer.
@@ -71,6 +73,7 @@ private:
     bool dma_fill_pending_ = false;
     bool vint_pending_ = false;
     bool vint_arm_ = false;
+    int dma_stall_ = 0;
     bool hint_pending_ = false;
     bool vblank_ = false;
     bool hblank_ = false;

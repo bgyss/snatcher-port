@@ -165,6 +165,13 @@ void Vdp::do_dma() {
         write_word(w);
         a = (a & 0xFE0000) | ((a + 2) & 0x1FFFF);
     }
+    {
+        // The 68K is held for the whole transfer: 16/18 words per line while the display is active, ~170/205 during blanking.
+        const bool h40 = width() == 320;
+        const bool active = display_enabled() && cur_line_ < active_lines();
+        double per_word = 488.0 / (active ? (h40 ? 18 : 16) : (h40 ? 205 : 167));
+        dma_stall_ += int(len * per_word);
+    }
     src = (a >> 1) & 0x7FFFFF;
     reg_[21] = uint8_t(src);
     reg_[22] = uint8_t(src >> 8);
