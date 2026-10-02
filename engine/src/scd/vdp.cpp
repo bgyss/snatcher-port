@@ -1,6 +1,15 @@
 #include "vdp.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+
+namespace {
+int layer_mask() {
+    static int m = std::getenv("SCD_LAYERS") ? std::atoi(std::getenv("SCD_LAYERS")) : 7;  // 1=B 2=A 4=sprites
+    return m;
+}
+}  // namespace
 
 namespace scd {
 
@@ -36,9 +45,8 @@ uint16_t Vdp::fetch_word(uint8_t code, uint32_t addr) const {
 
 uint16_t Vdp::read_data() {
     cmd_pending_ = false;
-    uint16_t r = read_buf_;
+    uint16_t r = fetch_word(code_, addr_ & ~1u);
     addr_ = uint16_t(addr_ + reg_[15]);
-    read_buf_ = fetch_word(code_, addr_ & ~1u);
     return r;
 }
 
@@ -96,9 +104,6 @@ void Vdp::write_ctrl(uint16_t v) {
         addr_ = uint16_t((cmd_first_ & 0x3FFF) | ((v & 3) << 14));
         if ((code_ & 0x20) && (reg_[1] & 0x10)) {
             do_dma();
-        } else if ((code_ & 0x0F) == 0x00 || (code_ & 0x0F) == 0x04 || (code_ & 0x0F) == 0x08) {
-            read_buf_ = fetch_word(code_, addr_ & ~1u);
-            addr_ = uint16_t(addr_ + reg_[15]);
         }
         return;
     }
@@ -129,6 +134,8 @@ void Vdp::do_dma() {
         dma_copy();
         return;
     }
+    if (std::getenv("SCD_VDPLOG"))
+        std::fprintf(stderr, "[vdp dma] line %d code=%02x addr=%04x src=%06x len=%u\n", cur_line_, code_, addr_, src << 1, len);
     uint32_t a = src << 1;
     for (uint32_t i = 0; i < len; ++i) {
         uint16_t w = dma_read ? dma_read(a) : 0;
@@ -370,9 +377,11 @@ void Vdp::render_line(int line) {
     // A zero-sized window disables it entirely.
     if (!(reg_[17] & 0x9F) && !(reg_[18] & 0x9F)) std::memset(wmask, 0, sizeof wmask);
 
-    render_plane(1, line, pb, wmask);
-    render_plane(0, line, pa, wmask);
-    render_sprites(line, ps, shi);
+    std::memset(pa, 0, sizeof pa);
+    std::memset(pb, 0, sizeof pb);
+    if (layer_mask() & 1) render_plane(1, line, pb, wmask);
+    if (layer_mask() & 2) render_plane(0, line, pa, wmask);
+    if (layer_mask() & 4) render_sprites(line, ps, shi);
 
     const bool sh = reg_[12] & 0x08;
     const int bg_idx = reg_[7] & 0x3F;

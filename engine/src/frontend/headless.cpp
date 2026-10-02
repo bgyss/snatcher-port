@@ -87,6 +87,7 @@ int main(int argc, char** argv) {
         int cpu, n; unsigned long long fr;
         if (std::sscanf(t, "%d:%llu:%d", &cpu, &fr, &n) == 3) sys.set_trace(cpu, fr, n);
     }
+    if (std::getenv("SCD_STACKAT") && std::getenv("SCD_FROM")) sys.set_trace_from(std::strtoull(std::getenv("SCD_FROM"), nullptr, 10));
     std::vector<int16_t> all_audio;
     for (int f = 0; f < frames && !sys.halted(); ++f) {
         uint16_t pad = 0;
@@ -111,6 +112,14 @@ int main(int argc, char** argv) {
     }
     if (std::getenv("SCD_DEBUG")) sys.dump_state();
     if (profile_from >= 0) sys.dump_profile(12);
+    if (std::getenv("SCD_VRAM")) {
+        FILE* f = std::fopen((out + "/vram.bin").c_str(), "wb");
+        std::fwrite(sys.vdp().vram(), 1, 0x10000, f);
+        std::fwrite(sys.vdp().cram(), 2, 64, f);
+        std::fwrite(sys.vdp().vsram(), 2, 64, f);
+        for (int i = 0; i < 24; ++i) std::fputc(sys.vdp().reg(i), f);
+        std::fclose(f);
+    }
     write_ppm(out + "/final.ppm", sys.framebuffer(), sys.width(), sys.height());
     if (!wav.empty()) write_wav(wav, all_audio);
     std::printf("ran %llu frames%s\n", (unsigned long long)sys.frame_count(), sys.halted() ? " (halted)" : "");

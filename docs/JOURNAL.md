@@ -28,3 +28,24 @@ Append-only log of confirmed facts and attempts. One entry per session.
 - The user supplied Sega CD BIOS dumps in `~/mame/roms/segacd/`. They were matched by SHA1 to MAME names and symlinked; the originals are untouched.
 - First Sega CD boot stopped at Snatcher's own message "Return to control screen, initialize at option screen". Cause: MAME's fresh 8 KB BRAM was all zeros. Writing the standard BRAM footer (`SEGA_CD_ROM`/`RAM_CARTRIDGE___`, 0x7D free blocks) fixed it.
 - Boot then reached the Konami logo, the title screen, Options and the RSS notice. A 75 s `-wavwrite` capture had peak −5.8 dB and RMS −28 dB with no silence gaps, so audio works. Automated runs use `-sound none` on purpose; interactive launches have sound.
+
+## 2026-10-02: engine bring-up (Mega CD core with BIOS HLE)
+
+Architecture decision: see `docs/ADR-001-engine-architecture.md`. Facts recovered while building `engine/`:
+
+- **Main IP** = hardware driver. It calls two Main BIOS entry points: `jsr $364` (region licence screen; skipped) and
+  `jsr $368` (a1 = V-INT handler, stored in the RAM jump slot `$FFFD08`). `jmp $28C` is "back to BIOS control panel".
+  Main RAM jump slots at `$FFFD06` (V-INT), `$FFFD0C` (H-INT), `$FFFD12` (level 2) are what the BIOS vectors point to.
+  `jsr $FFFDAE` is the Main-side `_BURAM` (same function numbers as Sub `$5F16`).
+- **SP** (`$6000`): header offset table at `$6020` = init `$602E`, main `$60A8`, int2 `$60BE`, user `$629C`; `$602A` is the file-service entry
+  (`d0` = 0 init, 1 poll, 2 find, 3 load to a1, 6 load, 9 name lookup; `a6` = work area `$A400`). It reads the ISO9660 directory itself
+  through `_CDBIOS`: ROMREADN `$20`, CDCSTAT `$8A`, CDCREAD `$8B`, CDCTRN `$8C`, CDCACK `$8D`.
+  CDC destination in `$FF8004` bits 2-0: 3 = Sub read, 4 = PCM RAM, 5 = PRG RAM, 7 = Word RAM; EDT = bit 7, DSR = bit 6; DMA address in `$FF800A` is `addr >> 3`.
+  After loading, SP copies `$7300..$75CF` (Main-CPU code: BURAM wrapper etc.) into Word RAM `$B7800`; Main copies it to `$FFE100` and runs it.
+- **Sub CPU BIOS contract used**: `_CDBIOS $5F22` (`d0`: `$08 $12 $20 $80 $81 $84 $89 $8A $8B $8C $8D`), `_BURAM $5F16` (0 init, 1 stat, 2 search, 3 read, 4 write, 5 delete, 7 dir, 8 verify),
+  `_WAITVSYNC $5F10`; level 3 jump slot is patched by SUBCODE at `$5F84`. `$FF8032` interrupt mask must have level 2 enabled by default.
+  Save file header passed to BRMWRITE: 11-byte name `SNATCHER_0x`, flag `$FF`, block count word `$000E` (14 x 32 bytes = the 448-byte save blob at Sub `$9C00`).
+- **Timing gotcha**: the V-INT request must trail the VBLANK status flag by ~110 Main cycles. The IP polls VBLANK (`btst #3,$C00005`) in a loop that runs inside a
+  nested V-INT handler; with simultaneous flag and interrupt it livelocks (checked against MAME's per-frame `e028/e022/e020` state, `tools/emu/trace_state.lua`).
+- Own HLE stack area lives below `$5F00`; a CDBSTAT buffer placed inside the stack corrupted return addresses (fixed: `$5000`).
+- Status: boots to the Konami logo, then to the backup-RAM device selection screen. Text on that screen is garbled (investigating).

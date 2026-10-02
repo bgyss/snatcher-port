@@ -21,11 +21,11 @@ constexpr int kMainPerLine = kMainClock / 60 / kLines;   // 488
 constexpr int kSubPerLine = kSubClock / 60 / kLines;     // 795
 constexpr int kSlices = 4;
 constexpr uint32_t kBiosCdbios = 0x5F22, kBiosBuram = 0x5F16, kBiosWaitVsync = 0x5F10, kBiosSetJmp = 0x5F0A;
-constexpr uint32_t kCdbstatArea = 0x5E80;  // BIOS work area handed back by CDBSTAT
+constexpr uint32_t kCdbstatArea = 0x5000;  // BIOS work area handed back by CDBSTAT
 
 enum Trap {
     kTrapWaitVsync = 1, kTrapBuram, kTrapCdbios, kTrapSetJmp,
-    kTrapMainLicense = 10, kTrapMainSetVint, kTrapMainRestart,
+    kTrapMainLicense = 10, kTrapMainSetVint, kTrapMainRestart, kTrapMainBuram,
     kTrapMainVector = 100,  // + vector number
     kTrapSubVector = 200,
 };
@@ -83,6 +83,7 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     disc_ = std::move(disc);
     save_path_ = save_path;
     trace_bios_ = std::getenv("SCD_TRACE_BIOS") != nullptr;
+    if (const char* w = std::getenv("SCD_STACKAT")) stack_at_ = uint32_t(std::strtoul(w, nullptr, 16));
     if (const char* w = std::getenv("SCD_WATCH")) watch_ = uint32_t(std::strtoul(w, nullptr, 16));
 
     uint8_t boot[0x8000];
@@ -115,6 +116,8 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
 
     build_main_rom();
     build_sub_bios();
+    bram_files_.clear();
+    bram_load();
 
     vdp_.reset();
     vdp_.dma_read = [this](uint32_t a) { return uint16_t(main_read16(a)); };
@@ -187,6 +190,11 @@ void System::build_main_rom() {
     trap(0x364, kTrapMainLicense);   // region licence screen: skipped
     trap(0x368, kTrapMainSetVint);   // a1 = V-INT handler
     trap(0x28C, kTrapMainRestart);   // return to the BIOS control panel
+    trap(0x70EE, kTrapMainBuram);    // Main CPU backup RAM entry, reached through the RAM slot at $FFFDAE
+    put16(main_ram_ + 0xFDA8, 0x4EF9);
+    put32(main_ram_ + 0xFDAA, 0x414);
+    put16(main_ram_ + 0xFDAE, 0x4EF9);
+    put32(main_ram_ + 0xFDB0, 0x70EE);
     std::memcpy(r + 0x100, "SEGA MEGA DRIVE ", 16);
 }
 
@@ -283,6 +291,13 @@ void System::update_main_irq() { refresh_irq(kMain); }
 void System::update_sub_irq() { refresh_irq(kSub); }
 
 void System::trace_pc(uint32_t pc) {
+    if (stack_at_ && (pc & 0xFFFFFF) == stack_at_ && frames_ >= trace_from_ && stack_left_ > 0) {
+        --stack_left_;
+        uint32_t sp = reg_get(M68K_REG_SP);
+        std::fprintf(stderr, "[stack %s pc=%06x sp=%06x]:", cur_ ? "S" : "M", pc, sp);
+        for (int i = 0; i < 16; ++i) std::fprintf(stderr, " %04x", read16(sp + 2 * i));
+        std::fprintf(stderr, "\n");
+    }
     if (trace_cpu_ == int(cur_) && trace_left_ > 0 && frames_ >= trace_from_) {
         --trace_left_;
         std::fprintf(stderr, "%s %06x  d0=%08x d1=%08x a0=%08x a1=%08x\n", cur_ ? "S" : "M", pc & 0xFFFFFF,
@@ -673,8 +688,13 @@ int System::illegal(int opcode) {
     int id = it->second;
     if ((id >= kTrapMainVector && id < kTrapMainVector + 64) || (id >= kTrapSubVector && id < kTrapSubVector + 64)) {
         bool sub = id >= kTrapSubVector;
-        log("[%s CPU] unexpected exception vector %d (frame %llu)\n", sub ? "Sub" : "Main",
-            id - (sub ? kTrapSubVector : kTrapMainVector), (unsigned long long)frames_);
+        uint32_t sp = reg_get(M68K_REG_SP);
+        uint32_t fpc = read16(sp + 2) << 16 | read16(sp + 4);
+        log("[%s CPU] unexpected exception vector %d at PC=%06x SR=%04x (frame %llu); code:",
+            sub ? "Sub" : "Main", id - (sub ? kTrapSubVector : kTrapMainVector), fpc & 0xFFFFFF, read16(sp),
+            (unsigned long long)frames_);
+        for (int i = -8; i < 8; i += 2) log(" %04x", read16(fpc + i));
+        log("\n");
         halted_ = true;
         m68k_end_timeslice();
         return 1;
@@ -693,7 +713,8 @@ int System::illegal(int opcode) {
             m68k_end_timeslice();
             break;
         case kTrapCdbios: cdbios(int(reg_get(M68K_REG_D0) & 0xFFFF)); break;
-        case kTrapBuram: buram(int(reg_get(M68K_REG_D0) & 0xFFFF)); break;
+        case kTrapBuram:
+        case kTrapMainBuram: buram(int(reg_get(M68K_REG_D0) & 0xFFFF)); break;
     }
     return 1;
 }
@@ -763,6 +784,7 @@ void System::cdbios(int fn) {
         case 0x20: {                                                           // ROMREADN
             cdc_lba_ = (uint32_t(sub_read8(a0)) << 24) | (sub_read8(a0 + 1) << 16) | (sub_read8(a0 + 2) << 8) | sub_read8(a0 + 3);
             cdc_remaining_ = (uint32_t(sub_read8(a0 + 4)) << 24) | (sub_read8(a0 + 5) << 16) | (sub_read8(a0 + 6) << 8) | sub_read8(a0 + 7);
+            if (trace_bios_) log("  ROMREADN lba=%u count=%u (frame %llu)\n", cdc_lba_, cdc_remaining_, (unsigned long long)frames_);
             cdc_reading_ = true;
             cdc_buf_valid_ = false;
             cdc_edt_ = cdc_dsr_ = false;
@@ -837,11 +859,185 @@ void System::cdbios(int fn) {
     }
 }
 
-void System::buram(int fn) {
-    if (trace_bios_) log("BURAM %02x a0=%06x a1=%06x d1=%08x\n", fn, reg_get(M68K_REG_A0), reg_get(M68K_REG_A1), reg_get(M68K_REG_D1));
-    // Placeholder until the backup RAM file system is implemented.
-    set_carry(true);
+// ------------------------------------------------------------ backup RAM
+// Internal backup RAM is 8 KB of 64-byte blocks. The BIOS _BURAM calls are emulated with a
+// simple file table that is serialised into the image: file data from the start, 0x20-byte
+// directory entries growing down from the header block at the end.
+
+namespace {
+constexpr int kBramSize = 0x2000;
+constexpr int kBramHeader = kBramSize - 0x40;
+constexpr int kBramBlocks = kBramSize / 0x40;
+constexpr const char kBramMagic[] = "SEGA_CD_ROM";
+}  // namespace
+
+int System::bram_free_blocks() const {
+    int used = 3;  // header, plus the BIOS reserves two more
+    for (auto& f : bram_files_) used += int((f.data.size() + 0x20 + 0x3F) / 0x40);
+    return std::max(0, kBramBlocks - used);
 }
+
+void System::bram_load() {
+    bram_files_.clear();
+    const uint8_t* h = bram_ + kBramHeader;
+    if (std::memcmp(h + 0x20, kBramMagic, 11) != 0) {
+        // Unformatted: format it like the BIOS does.
+        std::memset(bram_, 0, sizeof bram_);
+        std::memcpy(h == bram_ ? bram_ : bram_ + kBramHeader + 0x20, kBramMagic, 11);
+        bram_store();
+        return;
+    }
+    int count = bram_[kBramHeader + 0x18] << 8 | bram_[kBramHeader + 0x19];
+    uint32_t offset = 0;
+    for (int i = 0; i < count && i < 100; ++i) {
+        const uint8_t* e = bram_ + kBramHeader - 0x20 * (i + 1);
+        BramFile f;
+        std::memcpy(f.name, e, 11);
+        f.flag = e[11];
+        f.blocks = uint16_t(e[12] << 8 | e[13]);
+        size_t len = size_t(f.blocks) * 32;
+        if (offset + len > kBramHeader - 0x20 * (count)) break;
+        f.data.assign(bram_ + offset, bram_ + offset + len);
+        offset += uint32_t(len);
+        bram_files_.push_back(std::move(f));
+    }
+}
+
+void System::bram_store() {
+    std::memset(bram_, 0, sizeof bram_);
+    uint32_t offset = 0;
+    for (size_t i = 0; i < bram_files_.size(); ++i) {
+        const BramFile& f = bram_files_[i];
+        std::memcpy(bram_ + offset, f.data.data(), f.data.size());
+        offset += uint32_t(f.data.size());
+        uint8_t* e = bram_ + kBramHeader - 0x20 * (i + 1);
+        std::memcpy(e, f.name, 11);
+        e[11] = f.flag;
+        put16(e + 12, f.blocks);
+    }
+    uint8_t* h = bram_ + kBramHeader;
+    std::memcpy(h, "___________\0\0\0\0\x40", 16);
+    int free = bram_free_blocks();
+    for (int i = 0; i < 4; ++i) put16(h + 0x10 + 2 * i, uint16_t(free));
+    put16(h + 0x18, uint16_t(bram_files_.size()));
+    std::memcpy(h + 0x20, kBramMagic, 11);
+    h[0x2C] = 1;
+    std::memcpy(h + 0x30, "RAM_CARTRIDGE___", 16);
+    bram_dirty_ = true;
+}
+
+int System::bram_find(const uint8_t* name) const {
+    for (size_t i = 0; i < bram_files_.size(); ++i)
+        if (std::memcmp(bram_files_[i].name, name, 11) == 0) return int(i);
+    return -1;
+}
+
+void System::buram(int fn) {
+    const uint32_t a0 = reg_get(M68K_REG_A0), a1 = reg_get(M68K_REG_A1), d1 = reg_get(M68K_REG_D1);
+    if (trace_bios_) log("BURAM %02x a0=%06x a1=%06x d1=%08x\n", fn, a0, a1, d1);
+    if (bram_files_.empty() && std::memcmp(bram_ + kBramHeader + 0x20, kBramMagic, 11) != 0) bram_load();
+    auto read_name = [&](uint32_t a, uint8_t* n) { for (int i = 0; i < 11; ++i) n[i] = uint8_t(read8(a + i)); };
+    switch (fn) {
+        case 0: {  // BRMINIT
+            for (int i = 0; i < 16; ++i) write8(a1 + i, "SEGA_CD_ROM\0\0\0\0\0"[i]);
+            reg_set(M68K_REG_D0, kBramSize);
+            set_carry(false);
+            break;
+        }
+        case 1:  // BRMSTAT: d0 = free blocks, d1 = number of files
+            reg_set(M68K_REG_D0, uint32_t(bram_free_blocks()));
+            reg_set(M68K_REG_D1, uint32_t(bram_files_.size()));
+            set_carry(false);
+            break;
+        case 2: {  // BRMSERCH
+            uint8_t n[11];
+            read_name(a0, n);
+            int i = bram_find(n);
+            if (i < 0) { set_carry(true); break; }
+            for (int k = 0; k < 11; ++k) write8(a1 + k, bram_files_[i].name[k]);
+            write8(a1 + 11, bram_files_[i].flag);
+            write8(a1 + 12, bram_files_[i].blocks >> 8);
+            write8(a1 + 13, bram_files_[i].blocks & 0xFF);
+            reg_set(M68K_REG_D0, bram_files_[i].blocks);
+            set_carry(false);
+            break;
+        }
+        case 3: {  // BRMREAD
+            uint8_t n[11];
+            read_name(a0, n);
+            int i = bram_find(n);
+            if (i < 0) { set_carry(true); break; }
+            for (size_t k = 0; k < bram_files_[i].data.size(); ++k) write8(a1 + uint32_t(k), bram_files_[i].data[k]);
+            reg_set(M68K_REG_D0, bram_files_[i].blocks);
+            set_carry(false);
+            break;
+        }
+        case 4: {  // BRMWRITE: a0 = name[11] flag blocks.w, a1 = data
+            BramFile f;
+            read_name(a0, f.name);
+            f.flag = uint8_t(read8(a0 + 11));
+            f.blocks = uint16_t(read8(a0 + 12) << 8 | read8(a0 + 13));
+            f.data.resize(size_t(f.blocks) * 32);
+            for (size_t k = 0; k < f.data.size(); ++k) f.data[k] = uint8_t(read8(a1 + uint32_t(k)));
+            int old = bram_find(f.name);
+            BramFile saved;
+            if (old >= 0) { saved = bram_files_[old]; bram_files_.erase(bram_files_.begin() + old); }
+            bram_files_.push_back(f);
+            if (bram_free_blocks() == 0 && int(bram_files_.size()) > 1 && (f.data.size() + 0x20) / 0x40 > 0) {
+                // Out of space: roll back.
+                bram_files_.pop_back();
+                if (old >= 0) bram_files_.insert(bram_files_.begin() + old, saved);
+                set_carry(true);
+                break;
+            }
+            bram_store();
+            set_carry(false);
+            break;
+        }
+        case 5: {  // BRMDEL
+            uint8_t n[11];
+            read_name(a0, n);
+            int i = bram_find(n);
+            if (i < 0) { set_carry(true); break; }
+            bram_files_.erase(bram_files_.begin() + i);
+            bram_store();
+            set_carry(false);
+            break;
+        }
+        case 6:  // BRMFORMAT
+            bram_files_.clear();
+            bram_store();
+            set_carry(false);
+            break;
+        case 7: {  // BRMDIR: a0 = name pattern, a1 = buffer of 0x20-byte entries, d1 = skip count
+            uint32_t skip = d1 & 0xFFFF, n = 0;
+            for (size_t i = skip; i < bram_files_.size(); ++i, ++n) {
+                for (int k = 0; k < 11; ++k) write8(a1 + n * 0x20 + k, bram_files_[i].name[k]);
+                write8(a1 + n * 0x20 + 11, bram_files_[i].flag);
+                write8(a1 + n * 0x20 + 12, bram_files_[i].blocks >> 8);
+                write8(a1 + n * 0x20 + 13, bram_files_[i].blocks & 0xFF);
+            }
+            reg_set(M68K_REG_D0, n);
+            set_carry(false);
+            break;
+        }
+        case 8: {  // BRMVERIFY
+            uint8_t n[11];
+            read_name(a0, n);
+            int i = bram_find(n);
+            bool ok = i >= 0;
+            for (size_t k = 0; ok && k < bram_files_[i].data.size(); ++k)
+                ok = bram_files_[i].data[k] == uint8_t(read8(a1 + uint32_t(k)));
+            set_carry(!ok);
+            break;
+        }
+        default:
+            log("[BIOS] unimplemented _BURAM function %d\n", fn);
+            set_carry(true);
+            break;
+    }
+}
+
 
 void System::dump_state() {
     Cpu keep = cur_;

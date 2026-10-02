@@ -55,6 +55,7 @@ public:
     void dump_profile(int top);
     // Per-instruction trace of one CPU (0 = Main, 1 = Sub) starting at a frame.
     void set_trace(int cpu, uint64_t from_frame, int count) { trace_cpu_ = cpu; trace_from_ = from_frame; trace_left_ = count; }
+    void set_trace_from(uint64_t f) { trace_from_ = f; }
     void trace_pc(uint32_t pc);
 
     // Memory callbacks (Musashi).
@@ -99,6 +100,12 @@ private:
     void hle_trap(uint32_t pc);
     void cdbios(int fn);
     void buram(int fn);
+    struct BramFile { uint8_t name[11]; uint8_t flag; uint16_t blocks; std::vector<uint8_t> data; };
+    void bram_load();
+    void bram_store();
+    int bram_find(const uint8_t* name) const;
+    int bram_free_blocks() const;
+    std::vector<BramFile> bram_files_;
     bool cdc_load_sector();
     void cdc_do_transfer();
     void set_carry(bool c);
@@ -191,7 +198,8 @@ private:
 
     bool trace_bios_ = false;
     bool profile_ = false;
-    uint32_t watch_ = 0;
+    uint32_t watch_ = 0, stack_at_ = 0;
+    int stack_left_ = 20;
     int trace_cpu_ = -1, trace_left_ = 0;
     uint64_t trace_from_ = 0;
     std::map<uint32_t, int> pc_hist_[2];

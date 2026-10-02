@@ -41,6 +41,7 @@ public:
     // Debug access.
     const uint8_t* vram() const { return vram_; }
     const uint16_t* cram() const { return cram_; }
+    const uint16_t* vsram() const { return vsram_; }
     uint8_t reg(int n) const { return reg_[n]; }
 
 private:
