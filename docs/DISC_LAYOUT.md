@@ -84,11 +84,21 @@ here.
   unverified. The PCE font is likely a 12×12 or 16×16 kanji tile set in data,
   rather than the System Card's font **(hypothesis)**.
 
+## Confirmed load addresses (used by the Ghidra project)
+
+| Blob | CPU | Base | Evidence |
+|---|---|---|---|
+| disc `0x200..0x6800` (security block + IP) | Main | `0xFF0000` | BIOS convention; `bra` at `0xFF0008` → `0xFF0584` = end of US security block |
+| disc `0x6800..0x8000` (SP, module `MAIN A014`) | Sub | `0x6000` | standard SP header; jump table at `0x6020` → init `0x602E`, main `0x60A8`, int2 `0x60BE`, user `0x629C` |
+| `SUBCODE.BIN` | Sub | `0xD400` | SP code at `0x61F2`: `move.w #$60,d1; movea.l #$D400,a1; jsr …`. A brute-force base scan independently ranks `0xD400` first (113/194 call targets hit function boundaries vs 46 for the runner-up) |
+
+`SUBCODE.BIN` starts with `NOP; NOP` and then 23 `JMP` vectors (targets `0xD48E`–`0x166BA`).
+
 ## Open questions (next RE targets)
 
-1. Load address of `SUBCODE.BIN` in Sub-CPU program RAM (read the SP loader).
+1. ~~Load address of `SUBCODE.BIN`~~ → `0xD400` (confirmed).
 2. LZKN1 confirmation: find the decompressor in the IP and round-trip one pack.
-3. Script VM opcode table: find the dispatch jump table in `SUBCODE.BIN`.
+3. Script VM opcode table: find the dispatch jump table in `SUBCODE.BIN`. Prime suspects are `subcode_vec21`, `subcode_vec16` and `FUN_0000f8c0`, which hold almost all of Ghidra's `halt_baddata`, typical of unresolved `jmp (pc,dN)` tables.
 4. How scripts call into graphics (`DATA_*`), PCM (`PCMLT` index), and CD-DA tracks.
 5. PCM sample format: RF5C164 uses 8-bit sign-magnitude. Confirm the rate and loop markers.
 6. PCE sector map, text encoding and script format, for alignment with the Sega CD script.

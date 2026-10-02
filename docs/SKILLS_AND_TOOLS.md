@@ -17,12 +17,19 @@ contents before installing it.
 | `research` | Background research write-ups into `docs/`. |
 | `superpowers:writing-plans`, `test-driven-development`, `systematic-debugging` | Process skills for the engine build (round-trip tests, oracle diffs). |
 
+## Installed from the registry (2026-10-02)
+
+| Skill | Location | Notes |
+|---|---|---|
+| `trailofbits/skills-curated@ghidra-headless` | `~/.agents/skills/ghidra-headless` (symlinked into `~/.claude/skills`) | Reviewed: shell wrapper + Java export scripts, no network access. **Used by `tools/ghidra/setup_project.sh`** for `ExportAll.java` |
+| `mitsuhiko/agent-stuff@ghidra` | `~/.agents/skills/ghidra` | Same script set as above, with older, less hardened JSON escaping. Kept for reference; prefer the Trail of Bits copy |
+
+Neither wrapper (`ghidra-analyze.sh`) can import a raw binary at a base address, which 68000 boot code needs. The project therefore calls `analyzeHeadless` directly with `-loader BinaryLoader -loader-baseAddr` and our `SnatcherSetup.java` pre-script.
+
 ## Candidates from the skills registry (not installed)
 
 | Skill | Installs | Why | Install |
 |---|---|---|---|
-| `trailofbits/skills-curated@ghidra-headless` | 411 | Headless Ghidra batch analysis/export from a reputable security firm | `npx skills add trailofbits/skills-curated@ghidra-headless` |
-| `mitsuhiko/agent-stuff@ghidra` | 565 | Agent-driven Ghidra usage (author is a well-known OSS developer) | `npx skills add mitsuhiko/agent-stuff@ghidra` |
 | `zhaoxuya520/reverse-skill@ghidra-reverse` | 976 | Popular but from an unknown author. Review before use | `npx skills add zhaoxuya520/reverse-skill@ghidra-reverse` |
 | `wshobson/agents@binary-analysis-patterns` | 10.3K | General binary/format analysis patterns | `npx skills add wshobson/agents@binary-analysis-patterns` |
 | `quodsoler/unreal-engine-skills@ue-cpp-foundations`, `ue-project-context`, `ue-editor-tools`, `ue-input-system`, `ue-testing-debugging` | ~1K each | UE5 C++ plugin and gameplay work (Phase 4) | `npx skills add quodsoler/unreal-engine-skills@<name>` |
@@ -38,18 +45,17 @@ workflow settles: disc paths, Ghidra load addresses, LZKN1 tool, oracle replay.
 
 | Tool | Status on this machine | Role |
 |---|---|---|
-| Ghidra | ✓ installed (`~/.nix-profile/bin/ghidra`) | 68000 disassembly/decompiler (built-in `68000:BE:32`). HuC6280 needs a community 6502-family extension; to locate |
+| Ghidra 12.0 | ✓ installed (`~/.nix-profile/bin/ghidra`, nix store) | 68000 disassembly/decompiler (built-in `68000:BE:32`). HuC6280 needs a community 6502-family extension; to locate |
 | GhidraMCP / pyghidra-mcp | not installed | Lets the agent rename, retype and follow xrefs |
 | Python 3 | ✓ | `tools/` scripts |
 | ffmpeg | ✓ | PCM/CD-DA → WAV/FLAC |
 | RetroArch | ✓ (Genesis Plus GX core supports Sega CD and PCE CD) | Playback reference. No debugger |
-| MAME | not installed | Debugger for Sega CD (`segacd`) and PCE CD. Best scripted tracing (Lua) |
-| clownmdemu | not installed | Sega CD emulator with debugging views |
-| Mesen 2 | not installed | PC Engine CD support with a full debugger (sector-read tracing for the PCE map) |
+| MAME 0.288 | ✓ installed (`brew install mame`) | Debugger plus Lua for Sega CD (`segacd`) and PCE CD (`pce` + System Card). Launcher: `tools/emu/mame_debug.sh scd\|pce`. PCE verified booting to the Snatcher title screen. **Sega CD needs a BIOS**: `mpr-15045b.bin` (US model 1 v1.10) in `~/mame/roms/segacd/` |
+| clownmdemu | ✗ no macOS release (v1.6.12 ships Linux and Windows only) | Would need a source build. MAME covers Sega CD debugging |
+| Mesen 2.1.1 | ✓ installed (`~/Applications/Mesen.app`, official Apple Silicon build, ad-hoc signed) | Best PCE CD debugger (trace logger, event viewer, memory tools). Point it at a System Card 3 image on first CD boot (`~/Documents/RetroArch/system/syscard3.pce` exists) |
 | vasm / m68k toolchain | not installed | Only needed for test patches to the original |
 
-Suggested installs: `brew install mame`, Mesen 2 from GitHub releases, and a
-GhidraMCP server.
+Still to do: a GhidraMCP server for interactive agent renaming, and a Ghidra HuC6280 extension for the PCE side.
 
 ## Prior art and references
 
