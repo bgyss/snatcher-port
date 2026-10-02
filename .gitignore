@@ -1,0 +1,19 @@
+# Copyrighted disc images: never commit. Users supply their own.
+*.bin
+*.BIN
+*.iso
+*.ISO
+*.cue
+*.chd
+sega-cd-eng/
+pcengine-cd-jpn/
+
+# Extracted / decompiled game data stays local (see docs/STRATEGY.md "Legal guardrails").
+extracted/
+work/
+ghidra/*.gpr
+ghidra/*.rep/
+
+.DS_Store
+__pycache__/
+*.pyc
