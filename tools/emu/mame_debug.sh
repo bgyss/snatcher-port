@@ -7,6 +7,7 @@
 # BIOS images are NOT in the repo. Defaults:
 #   Sega CD : $MAME_ROMPATH/segacd/mpr-15045b.bin (or segacd.zip), MAME_ROMPATH=~/mame/roms
 #   PCE     : $PCE_SYSCARD, default ~/Documents/RetroArch/system/syscard3.pce
+# Audio is on by default (MAME's default sound backend). Record with -wavwrite out.wav.
 # Useful extras: -nodebug (plain run), -debugscript tools/emu/<file>.cmd, -window -nomaximize
 set -euo pipefail
 
@@ -21,6 +22,10 @@ common=(-rompath "$ROMPATH" -window -nomaximize -debug -skip_gameinfo
         -cfg_directory "$STATE/cfg" -nvram_directory "$STATE/nvram"
         -snapshot_directory "$STATE/snap" -state_directory "$STATE/sta"
         -diff_directory "$STATE/diff" -comment_directory "$STATE/comments")
+BRAM="$STATE/nvram/segacd/segacd_backupram"
+if [[ "$which" == scd && ! -s "$BRAM" ]]; then
+  python3 "$ROOT/tools/emu/format_bram.py" "$BRAM"   # unformatted BRAM blocks Snatcher at boot
+fi
 case "$which" in
   scd) exec mame segacd "${common[@]}" -cdrm "$ROOT/sega-cd-eng/Snatcher (Sega CD) (U)-redump.cue" "$@" ;;
   pce) exec mame pce "${common[@]}" -cart "$SYSCARD" -cdrm "$ROOT/pcengine-cd-jpn/Snatcher_(NTSC-J)_[KMCD2002].cue" "$@" ;;

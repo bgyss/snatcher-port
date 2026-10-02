@@ -50,7 +50,7 @@ workflow settles: disc paths, Ghidra load addresses, LZKN1 tool, oracle replay.
 | Python 3 | ✓ | `tools/` scripts |
 | ffmpeg | ✓ | PCM/CD-DA → WAV/FLAC |
 | RetroArch | ✓ (Genesis Plus GX core supports Sega CD and PCE CD) | Playback reference. No debugger |
-| MAME 0.288 | ✓ installed (`brew install mame`) | Debugger plus Lua for Sega CD (`segacd`) and PCE CD (`pce` + System Card). Launcher: `tools/emu/mame_debug.sh scd\|pce`. PCE verified booting to the Snatcher title screen. **Sega CD needs a BIOS**: `mpr-15045b.bin` (US model 1 v1.10) in `~/mame/roms/segacd/` |
+| MAME 0.288 | ✓ installed (`brew install mame`) | Debugger plus Lua for Sega CD (`segacd`) and PCE CD (`pce` + System Card). Launcher: `tools/emu/mame_debug.sh scd\|pce`. PCE verified booting to the Snatcher title screen. Sega CD BIOS: US Model 1 v1.10 (`mpr-15045b.bin`, SHA1 `f4f315ad…`) is symlinked from the user's dumps in `~/mame/roms/segacd/`. `segacd` and `megacd` verify OK. The launcher formats internal BRAM on first run (`tools/emu/format_bram.py`) |
 | clownmdemu | ✗ no macOS release (v1.6.12 ships Linux and Windows only) | Would need a source build. MAME covers Sega CD debugging |
 | Mesen 2.1.1 | ✓ installed (`~/Applications/Mesen.app`, official Apple Silicon build, ad-hoc signed) | Best PCE CD debugger (trace logger, event viewer, memory tools). Point it at a System Card 3 image on first CD boot (`~/Documents/RetroArch/system/syscard3.pce` exists) |
 | vasm / m68k toolchain | not installed | Only needed for test patches to the original |
