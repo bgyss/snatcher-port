@@ -21,3 +21,4 @@ ghidra/*.lock*
 .venv/
 engine/build*/
 dist/
+engine/tests/lift_cases.inc
