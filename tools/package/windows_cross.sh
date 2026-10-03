@@ -11,7 +11,9 @@ T
 export CC=/usr/bin/clang CXX=/usr/bin/clang++
 cmake -S engine -B engine/build-hostgen >/dev/null && cmake --build engine/build-hostgen --target musashi >/dev/null
 unset CC CXX
-cmake -S engine -B engine/build-win2 -DMUSASHI_PREGEN=$PWD/engine/build-hostgen/musashi_gen -DCMAKE_TOOLCHAIN_FILE=/tmp/mingw-toolchain.cmake -DSNATCHER_FETCH_SDL=ON -DCMAKE_BUILD_TYPE=Release
+CODE=${SNATCHER_CODE_DIR:-$PWD/extracted/code}
+TR=; [ -f "$CODE/scd_subcode.bin" ] && TR=-DSNATCHER_TRANSLATE_DIR=$CODE
+cmake -S engine -B engine/build-win2 $TR -DMUSASHI_PREGEN=$PWD/engine/build-hostgen/musashi_gen -DCMAKE_TOOLCHAIN_FILE=/tmp/mingw-toolchain.cmake -DSNATCHER_FETCH_SDL=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build engine/build-win2 -j8
 mkdir -p dist/windows && cp engine/build-win2/snatcher.exe dist/windows/
 echo "built dist/windows/snatcher.exe"

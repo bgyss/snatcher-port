@@ -17,11 +17,13 @@ struct Bus {
 };
 
 struct Exit {
-    enum Kind { None, Unsupported, DivZero, Trap };
+    enum Kind { None, Unsupported, DivZero, Trap, Budget, NotTranslated };
     uint32_t pc = 0;
     Kind kind = None;
     int arg = 0;
 };
+
+struct Span { uint32_t lo, hi, crc; };
 
 struct Cpu {
     uint32_t d[8] = {}, a[8] = {};   // a[7] is the active stack pointer

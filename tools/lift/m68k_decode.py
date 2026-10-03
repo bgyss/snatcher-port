@@ -412,7 +412,7 @@ def _group4(ctx, op, ins, code):
     if op == 0x4E72: raise Unsupported('stop')
     if op == 0x4AFC: raise Unsupported('illegal')
     if op & 0xFFF0 == 0x4E40:
-        code.append('return lift::Exit{%s, lift::Exit::Trap, %d};' % (hx(pc + 2), op & 15)); ins.flow = ('stop',); return
+        code.append('return lift::Exit{%s, lift::Exit::Trap, %d};' % (hx(pc), op & 15)); ins.flow = ('stop',); return
     if op & 0xFFF8 == 0x4E50:
         d = s16(ctx.ext()); code.append('c.a[7] -= 4; c.bus->w32(c.a[7], c.a[%d]); c.a[%d] = c.a[7]; c.a[7] += (%d);' % (reg, reg, d)); return
     if op & 0xFFF8 == 0x4E58:

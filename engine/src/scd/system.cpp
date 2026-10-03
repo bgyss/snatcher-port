@@ -9,6 +9,15 @@
 extern "C" {
 #include "m68k.h"
 }
+#ifdef SNATCHER_TRANSLATED
+#include "cpu68k.h"
+namespace lift {
+bool sub_has(uint32_t pc);
+Exit sub_run(Cpu& c, uint32_t pc, int32_t& budget);
+extern const Span kSubSpans[];
+extern const int kSubSpanCount;
+}  // namespace lift
+#endif
 
 namespace scd {
 
@@ -85,6 +94,9 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     disc_ = std::move(disc);
     save_path_ = save_path;
     trace_bios_ = std::getenv("SCD_TRACE_BIOS") != nullptr;
+#ifdef SNATCHER_TRANSLATED
+    translate_ = std::getenv("SCD_NO_TRANSLATE") == nullptr;
+#endif
     trace_audio_ = std::getenv("SCD_TRACE_AUDIO") != nullptr;
     if (const char* w = std::getenv("SCD_STACKAT")) stack_at_ = uint32_t(std::strtoul(w, nullptr, 16));
     if (const char* w = std::getenv("SCD_WATCH")) watch_ = uint32_t(std::strtoul(w, nullptr, 16));
@@ -338,6 +350,108 @@ void System::advance_sub_time(int cycles) {
     }
 }
 
+
+#ifdef SNATCHER_TRANSLATED
+struct SubBusAdapter : lift::Bus {
+    System& s;
+    explicit SubBusAdapter(System& sys) : s(sys) {}
+    uint8_t r8(uint32_t a) override { return uint8_t(s.sub_read8(a)); }
+    uint16_t r16(uint32_t a) override { return uint16_t(s.sub_read8(a) << 8 | s.sub_read8(a + 1)); }
+    void w8(uint32_t a, uint8_t v) override { s.sub_write8(a, v); }
+    void w16(uint32_t a, uint16_t v) override { s.sub_write8(a, v >> 8); s.sub_write8(a + 1, v & 0xFF); }
+};
+
+struct LogBus : SubBusAdapter {
+    using SubBusAdapter::SubBusAdapter;
+    bool logging = false;
+    std::vector<std::pair<uint32_t, uint8_t>> writes;  // address, old value
+    void w8(uint32_t a, uint8_t v) override { if (logging) writes.push_back({a & 0xFFFFFF, r8(a)}); SubBusAdapter::w8(a, v); }
+    void w16(uint32_t a, uint16_t v) override { w8(a, v >> 8); w8(a + 1, v & 0xFF); }
+};
+
+static uint32_t crc32_of(const uint8_t* p, size_t n) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < n; ++i) { crc ^= p[i]; for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1))); }
+    return ~crc;
+}
+
+// Runs the Sub CPU for `cycles`, executing translated code where available and falling back to Musashi per instruction.
+// Returns cycles actually used. cur_ must be kSub.
+int System::run_sub_translated(int cycles) {
+    static LogBus bus(*this);
+    static const bool verify = std::getenv("SCD_LIFT_VERIFY") != nullptr;
+    lift::Cpu c;
+    c.bus = &bus;
+    int32_t budget = cycles;
+    while (budget > 0) {
+        uint32_t pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
+        uint32_t sr = reg_get(M68K_REG_SR);
+        bool irq_blocked = sub_irq_level() <= int((sr >> 8) & 7);
+        if (irq_blocked && lift::sub_has(pc)) {
+            for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
+            c.set_ccr(sr & 0x1F);
+            c.sr_sys = uint16_t(sr & 0xA700);
+            // Verify once that the code in memory is what was translated.
+            for (int i = 0; i < lift::kSubSpanCount; ++i) {
+                const lift::Span& sp = lift::kSubSpans[i];
+                if (pc >= sp.lo && pc < sp.hi && !span_checked_[i]) {
+                    span_checked_[i] = true;
+                    span_ok_[i] = crc32_of(prg_ram_ + sp.lo, sp.hi - sp.lo) == sp.crc;
+                    if (!span_ok_[i]) log("[translate] code at %06x differs from the translated image; using the interpreter there\n", sp.lo);
+                }
+            }
+            bool ok = true;
+            for (int i = 0; i < lift::kSubSpanCount; ++i)
+                if (pc >= lift::kSubSpans[i].lo && pc < lift::kSubSpans[i].hi) ok = span_ok_[i];
+            if (ok) {
+                int32_t before = budget;
+                lift::Cpu saved = c;
+                uint32_t spc = pc;
+                if (verify) { bus.logging = true; bus.writes.clear(); budget = 1; before = 1; }
+                lift::Exit ex = lift::sub_run(c, pc, budget);
+                if (verify && ex.kind != lift::Exit::NotTranslated && ex.kind != lift::Exit::Unsupported) {
+                    // Undo the writes, replay the same instruction in Musashi, compare.
+                    auto writes = bus.writes; bus.logging = false;
+                    std::vector<uint8_t> after(writes.size());
+                    for (size_t i = 0; i < writes.size(); ++i) after[i] = uint8_t(sub_read8(writes[i].first));
+                    for (size_t i = writes.size(); i-- > 0;) sub_write8(writes[i].first, writes[i].second);
+                    for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, saved.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, saved.a[i]); }
+                    reg_set(M68K_REG_SP, saved.a[7]); reg_set(M68K_REG_SR, saved.sr_sys | saved.ccr()); reg_set(M68K_REG_PC, spc);
+                    m68k_execute(1);
+                    bool bad = false;
+                    for (int i = 0; i < 8 && !bad; ++i) {
+                        uint32_t m = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP);
+                        if (reg_get(M68K_REG_D0 + i) != c.d[i]) { log("[lift-verify] pc=%06x op=%04x d%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.d[i], reg_get(M68K_REG_D0 + i)); bad = true; }
+                        else if (m != c.a[i]) { log("[lift-verify] pc=%06x op=%04x a%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.a[i], m); bad = true; }
+                    }
+                    if (!bad && (reg_get(M68K_REG_PC) & 0xFFFFFF) != (ex.pc & 0xFFFFFF)) { log("[lift-verify] pc=%06x op=%04x next lift=%06x musashi=%06x\n", spc, read16(spc), ex.pc, reg_get(M68K_REG_PC) & 0xFFFFFF); bad = true; }
+                    if (!bad && (reg_get(M68K_REG_SR) & 0x1F) != c.ccr()) { log("[lift-verify] pc=%06x op=%04x ccr lift=%02x musashi=%02x\n", spc, read16(spc), c.ccr(), reg_get(M68K_REG_SR) & 0x1F); bad = true; }
+                    for (size_t i = 0; i < writes.size() && !bad; ++i) if (uint8_t(sub_read8(writes[i].first)) != after[i]) { log("[lift-verify] pc=%06x op=%04x mem[%06x] lift=%02x musashi=%02x\n", spc, read16(spc), writes[i].first, after[i], sub_read8(writes[i].first)); bad = true; }
+                    budget -= 4;
+                    ++verified_;
+                    continue;
+                }
+                bus.logging = false;
+                translated_instr_budget_ += uint64_t(before - budget);
+                for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, c.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, c.a[i]); }
+                reg_set(M68K_REG_SP, c.a[7]);
+                reg_set(M68K_REG_SR, c.sr_sys | c.ccr());
+                reg_set(M68K_REG_PC, ex.pc);
+                exit_ring_[exit_pos_++ & 15] = uint32_t(ex.kind) << 28 | (ex.pc & 0xFFFFFF);
+                if (ex.kind == lift::Exit::Budget) break;
+                if (ex.pc != pc || ex.kind != lift::Exit::NotTranslated) { /* fall through to a fallback step at ex.pc */ }
+            }
+        }
+        // Interpreter step (also services pending interrupts).
+        ++fallback_steps_;
+        int used = m68k_execute(1);
+        budget -= used > 0 ? used : 4;
+        if (sub_wait_vsync_ || halted_) break;   // a HLE call parked the CPU
+    }
+    return cycles - budget;
+}
+#endif
+
 void System::run_cpu(Cpu c, int cycles) {
     if (c == kSub && (!sub_run_ || sub_wait_vsync_)) {
         advance_sub_time(cycles);
@@ -348,7 +462,12 @@ void System::run_cpu(Cpu c, int cycles) {
     if (budget <= 0) return;
     select_cpu(c);
     refresh_irq(c);
-    int used = m68k_execute(budget);
+    int used;
+#ifdef SNATCHER_TRANSLATED
+    used = (c == kSub && translate_) ? run_sub_translated(budget) : m68k_execute(budget);
+#else
+    used = m68k_execute(budget);
+#endif
     cpu_debt_[c] = used - budget;
     if (profile_) ++pc_hist_[c][reg_get(M68K_REG_PC) & 0xFFFFFF];
     if (c == kSub) advance_sub_time(used);
@@ -708,6 +827,7 @@ int System::illegal(int opcode) {
             (unsigned long long)frames_);
         for (int i = -8; i < 8; i += 2) log(" %04x", read16(fpc + i));
         log("\n");
+        if (sub) { log("  last translated exits (kind<<28|pc):"); for (int i = 0; i < 16; ++i) log(" %08x", exit_ring_[(exit_pos_ + i) & 15]); log("\n"); }
         halted_ = true;
         m68k_end_timeslice();
         return 1;

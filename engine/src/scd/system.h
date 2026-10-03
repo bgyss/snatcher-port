@@ -48,6 +48,8 @@ public:
     uint8_t sub_flag() const { return sub_flag_; }
     std::string comm_string() const;
     uint64_t ym_write_count() const { return ym_writes_; }
+    bool translated() const { return translate_; }
+    uint64_t fallback_steps() const { return fallback_steps_; }
     bool halted() const { return halted_; }
     uint8_t* main_ram() { return main_ram_; }
     uint8_t* prg_ram() { return prg_ram_; }
@@ -73,6 +75,14 @@ public:
 private:
     System() = default;
     enum Cpu { kMain = 0, kSub = 1 };
+    friend struct SubBusAdapter;
+    int run_sub_translated(int cycles);
+    bool translate_ = false;
+    bool span_ok_[4] = {false, false, false, false};
+    bool span_checked_[4] = {false, false, false, false};
+    uint64_t translated_instr_budget_ = 0, fallback_steps_ = 0, verified_ = 0;
+    uint32_t exit_ring_[16] = {};
+    uint32_t exit_pos_ = 0;
 
     // CPU scheduling
     void select_cpu(Cpu c);

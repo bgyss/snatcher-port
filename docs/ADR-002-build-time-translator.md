@@ -26,3 +26,11 @@ extension-word forms reliably, so the decoder needs its own instruction table (a
   Undefined BCD V/N flags mirror Musashi. Not covered: `rte`/`move to sr` (privilege/stack switching), traps, `stop`, `chk`, and encodings Musashi treats as illegal.
 - Next: `tools/lift/gen_program.py` (recursive-descent over entry points, one `switch(pc)` dispatch function, fall-through between adjacent instructions),
   a hook in `System` that runs translated code when the Sub CPU PC is inside it and falls back to Musashi otherwise, then whole-scene comparison against MAME.
+
+## Integration (2026-10-02)
+- `tools/lift/gen_program.py` translates SP + SUBCODE (6,414 instructions reachable by recursive descent, 154 entry points) into one `switch(pc)` function.
+  `cmake -DSNATCHER_TRANSLATE_DIR=<dir>` runs it at build time and defines `SNATCHER_TRANSLATED`.
+- `System::run_sub_translated` runs translated code while the Sub PC is inside it and steps Musashi for everything else (BIOS stubs, overlays at `$28000`, interrupts, HLE traps).
+  It checks once that the code in PRG RAM matches the translated image (CRC). `SCD_NO_TRANSLATE=1` forces the interpreter; `SCD_LIFT_VERIFY=1` re-executes every translated instruction in Musashi and reports mismatches.
+- Result: title screen 100.00% pixel-identical to MAME with the Sub CPU running translated C++; the scripted run through Options, the story text and the first in-game screen matches the interpreter build.
+- Not translated yet: the Main CPU IP (`$FF0000`), the `$28000` overlays and the Main code copied to `$FFE100`; these still run in Musashi. Coverage of reachable SUBCODE is partial (jump tables are heuristic).

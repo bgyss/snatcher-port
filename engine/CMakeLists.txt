@@ -37,7 +37,19 @@ target_include_directories(nuked_opn2 PUBLIC third_party/nuked-opn2)
 # ---- Core (no platform dependencies)
 add_library(scdcore STATIC
   src/scd/disc.cpp src/scd/vdp.cpp src/scd/pcm.cpp src/scd/psg.cpp src/scd/system.cpp)
-target_include_directories(scdcore PUBLIC src/scd)
+target_include_directories(scdcore PUBLIC src/scd src/lift)
+
+# Optional: build-time translation of the Sub CPU program from the user's own disc blobs
+# (cmake -DSNATCHER_TRANSLATE_DIR=<dir with scd_sub_sp.bin / scd_subcode.bin>, see tools/extract_code.py).
+if(SNATCHER_TRANSLATE_DIR)
+  find_package(Python3 REQUIRED)
+  set(GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+  add_custom_command(OUTPUT ${GEN_DIR}/sub_translated.cpp
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${GEN_DIR} ${SNATCHER_TRANSLATE_DIR}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/m68k_decode.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/emit.py)
+  target_sources(scdcore PRIVATE ${GEN_DIR}/sub_translated.cpp)
+  target_compile_definitions(scdcore PUBLIC SNATCHER_TRANSLATED=1)
+endif()
 target_link_libraries(scdcore PUBLIC musashi nuked_opn2)
 
 # ---- Headless runner (tests, oracle captures)
