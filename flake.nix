@@ -25,7 +25,7 @@
             # Use the stdenv compiler from this shell, never a stray ~/.nix-profile gcc (it cannot link against the macOS SDK).
             export CC=$(command -v ${if pkgs.stdenv.isDarwin then "clang" else "gcc"})
             export CXX=$(command -v ${if pkgs.stdenv.isDarwin then "clang++" else "g++"})
-            echo "snatcher-decomp shell: cmake $(cmake --version | head -1 | cut -d' ' -f3), python $(python3 --version | cut -d' ' -f2)"
+            echo "snatcher-port shell: cmake $(cmake --version | head -1 | cut -d' ' -f3), python $(python3 --version | cut -d' ' -f2)"
             echo "Disc images, BIOS dumps and extracted/ stay local (gitignored). See README.md."
           '';
         };

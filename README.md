@@ -1,4 +1,4 @@
-# snatcher-decomp
+# snatcher-port
 
 A research project to reverse-engineer Konami's *Snatcher* (Sega CD, 1994) and
 build:
