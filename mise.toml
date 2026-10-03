@@ -58,3 +58,7 @@ run = "engine/build/snatcher \"$SCD_CUE\" --record \"${VIDEO_OUT:-work/demo/snat
 [tasks."check:macos-present"]
 description = "Re-check the macOS Metal present stalls (docs/MACOS_NOTES.md)"
 run = "tools/macos/check_present.sh"
+
+[tasks."extract:content"]
+description = "Extract text, script screenplays, graphics, PCM and CD-DA to extracted/content (docs/plans/CONTENT_EXTRACTION.md)"
+run = "python tools/content/extract.py \"$SCD_CUE\" --out extracted/content"

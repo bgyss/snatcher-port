@@ -68,3 +68,34 @@ Architecture decision: see `docs/ADR-001-engine-architecture.md`. Facts recovere
 - Reporting `CDBSTAT` honestly (status `$0100` + advancing absolute/track MSF while CD-DA plays, `$0500` idle) removed the Main-CPU crash after QUIT: the game now runs title -> options -> story text -> "Moscow: June 6, 1996" -> first in-game screen, with audio.
 - Mac app: `tools/package/mac_app.sh` -> `dist/Snatcher.app` (arm64, bundles SDL3). Windows: CI workflow only (untested).
 - Open: audio levels clip (YM/PCM scaling), PCM voice streaming and CD-DA unverified vs MAME, saves untested, no light-gun input.
+
+## 2026-10-03: content formats (branch `content-extraction`, `tools/content/`)
+
+Method: `SCD_PROBE=<M|S>:<pc>,...` logs registers (+16 bytes at a5) whenever the interpreter reaches a PC; decoders are
+accepted only when they reproduce what the game's own routine did.
+
+- **Konami LZ** (Main `$FF1996`, Sub `$F348`; `$F346` skips a 2-byte header first): 8 flags per byte, LSB first; flag 0 =
+  literal; flag 1 = byte b: `1F` end, `<80` 10-bit offset `((b>>5)&3)<<8|next`, length `(b&1F)+3`; `80..BF` offset
+  `b&0F`, length `(b>>4)-6`; `>=C0` raw run of `b-B8` bytes. 171/171 blobs the Sub CPU decompressed during the intro
+  are byte-identical in `tools/content/konami_lz.py` (located on disc by signature with `lz_locate.py`).
+- **DATA packs** load at PRG `$28000`. Command lists `FFFF <type> ...`: `01xx` = graphics `(u32 ptr, u16 0, u16 VRAM
+  addr)` entries, each ptr -> `[u16 decompressed size][LZ]`; tiles from `0x0000`, 32x32 nametables at `0xC000`
+  (plane A) / `0xE000` (plane B). `000A` = palette `<u16 ?> <u16 count-1> <u32 ptr>`: the Neo Kobe City palette at
+  `DATA_D0+0x36F60` equals CRAM lines 0-1 at frame 13,800 (lines 2-3 follow it, slightly animated). `02xx` = sprite
+  objects `(u16 id, i16 x, i16 y, u32 data, u16 frame)`. D packs contain 68000 code; the intro does not run the script VM.
+- **Scripts** `SPxx.BIN` load at PRG `$1A800` (SP06 seen at Junker HQ). Bytecode from 0, `FF` padding, text table at
+  `0x3800`: `FF`-terminated ASCII, `F2` newline, `F6` new box?, `F4` auto-advance?, `FA/FB/FC/FE`..`F9` highlight
+  colours, `EC/EE` button glyphs.
+- **Script VM**: dispatch `$16974` (opcode = byte at a2+a3, a2 = script base, a3 = pc), table `$16CDC` (4 bytes per
+  opcode, 0x00-0x4A): byte 0 / high nibble / low nibble of byte 1 = types of operands 1-3, word 2 = handler - `$15400`.
+  Operand types (from the skip routine `$1699A`): 0/7 none, 4 nested instruction, else u16; a type with bit 3 makes a
+  block whose u16 after the opcode is its end address. All 39 scripts decode exactly to the padding, with a bare `00`
+  before it as the end. `op43(op20(speaker, text))` shows a line (8,808/8,808 text offsets resolve), `op38(label,
+  body)` is a menu option (3,755/3,755 labels resolve), `op26` groups options, `op25` = sequence, `op2B` = goto.
+- **PCM**: `PCMLD_01` is 8-bit sign-magnitude. 35 clips have `[u32 len][FFFFFFFF][u16 Hz][6x00]` headers (12-32 kHz);
+  the rest are streams indexed by `PCMLT_01` records `<u16 kind> <u16 param> <u16 start sector> <u16 sectors>` (kinds
+  `03xx/04xx/07xx/08xx`, plus a trailing table of 8-word records). During the intro the game only writes FD `0x0600`
+  (32,552 x 0x600/0x800 ≈ 24,414 Hz).
+- Correction: the 2026-10-02 frame-time and translated-vs-interpreter comparisons passed presses as an unquoted zsh
+  `$P`, which zsh does not word-split, so those runs had **no input** (boot to the title only). Same-input comparisons
+  remain valid; coverage was narrower than reported.

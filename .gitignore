@@ -5,12 +5,13 @@
 *.ISO
 *.cue
 *.chd
-sega-cd-eng/
-pcengine-cd-jpn/
+sega-cd-eng
+pcengine-cd-jpn
 
+# (No trailing slash: worktrees symlink these to the main checkout.)
 # Extracted / decompiled game data stays local (see docs/STRATEGY.md "Legal guardrails").
-extracted/
-work/
+extracted
+work
 ghidra/*.gpr
 ghidra/*.rep/
 
@@ -18,7 +19,7 @@ ghidra/*.rep/
 __pycache__/
 *.pyc
 ghidra/*.lock*
-.venv/
+.venv
 engine/build*/
 dist/
 engine/tests/lift_cases.inc

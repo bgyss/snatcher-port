@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -80,8 +81,15 @@ int main(int argc, char** argv) {
             int f, h;
             char b[16];
             if (std::sscanf(argv[++i], "%d:%15[^:]:%d", &f, b, &h) == 3) presses.push_back({f, parse_buttons(b), h});
+        } else if (a == "--press-every" && i + 1 < argc) {   // FROM:TO:STEP:BUTTONS:HOLD, e.g. mash C to advance text
+            int from, to, step, h;
+            char b[16];
+            if (std::sscanf(argv[++i], "%d:%d:%d:%15[^:]:%d", &from, &to, &step, b, &h) == 5 && step > 0)
+                for (int f = from; f < to; f += step) presses.push_back({f, parse_buttons(b), h});
         }
     }
+    std::error_code mk;
+    std::filesystem::create_directories(out, mk);   // every dump below writes into --out
     std::string err;
     auto disc = Disc::open(cue, &err);
     if (!disc) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
@@ -168,7 +176,12 @@ int main(int argc, char** argv) {
     if (profile_from >= 0) sys.dump_profile(12);
     if (std::getenv("SCD_OVERLAYS")) sys.dump_overlay_hist();
     if (std::getenv("SCD_DUMP_RAM")) {
-        auto dump = [&](const char* n, const uint8_t* p, size_t len) { FILE* f = std::fopen((out + n).c_str(), "wb"); std::fwrite(p, 1, len, f); std::fclose(f); };
+        auto dump = [&](const char* n, const uint8_t* p, size_t len) {
+            FILE* f = std::fopen((out + n).c_str(), "wb");
+            if (!f) { std::fprintf(stderr, "error: cannot write %s%s (does --out exist?)\n", out.c_str(), n); return; }
+            std::fwrite(p, 1, len, f);
+            std::fclose(f);
+        };
         dump("/main_ram.bin", sys.main_ram(), 0x10000);
         dump("/prg_ram.bin", sys.prg_ram(), 0x80000);
         dump("/word_ram.bin", sys.word_ram(), 0x40000);

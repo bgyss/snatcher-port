@@ -117,6 +117,19 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     trace_audio_ = std::getenv("SCD_TRACE_AUDIO") != nullptr;
     if (const char* w = std::getenv("SCD_STACKAT")) stack_at_ = uint32_t(std::strtoul(w, nullptr, 16));
     if (const char* w = std::getenv("SCD_WATCH")) watch_ = uint32_t(std::strtoul(w, nullptr, 16));
+    // SCD_PROBE=M:ff1996,S:28000,... logs all registers whenever that CPU reaches one of the PCs (interpreted code only:
+    // combine with SCD_NO_TRANSLATE=1). Used to recover formats by watching the game's own routines.
+    if (const char* p = std::getenv("SCD_PROBE")) {
+        for (const char* q = p; *q;) {
+            char cpu = *q;
+            const char* colon = std::strchr(q, ':');
+            if (!colon) break;
+            char* end;
+            uint32_t pc = uint32_t(std::strtoul(colon + 1, &end, 16));
+            probes_[cpu == 'S' || cpu == 's' ? 1 : 0].push_back(pc & 0xFFFFFF);
+            q = *end ? end + 1 : end;
+        }
+    }
 
     uint8_t boot[0x8000];
     for (int i = 0; i < 16; ++i)
@@ -324,6 +337,16 @@ void System::update_sub_irq() { refresh_irq(kSub); }
 
 void System::trace_pc(uint32_t pc) {
     if (ovl_log_ && cur_ == kSub && pc >= 0x16700 && pc < 0x80000) ovl_hist_[(pc >> 8) << 8]++;
+    for (uint32_t p : probes_[cur_ == kSub]) {
+        if ((pc & 0xFFFFFF) != p) continue;
+        std::fprintf(stderr, "PROBE %llu %s %06x", (unsigned long long)frames_, cur_ == kSub ? "S" : "M", p);
+        for (int i = 0; i < 8; ++i) std::fprintf(stderr, " d%d=%08x", i, reg_get(M68K_REG_D0 + i));
+        for (int i = 0; i < 8; ++i) std::fprintf(stderr, " a%d=%08x", i, i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP));
+        uint32_t a5 = reg_get(M68K_REG_A5);   // the bytes a5 points at (the source operand of most copy/decode routines)
+        std::fprintf(stderr, " @a5=");
+        for (int i = 0; i < 16; i += 2) std::fprintf(stderr, "%04x", read16(a5 + i) & 0xFFFF);
+        std::fprintf(stderr, "\n");
+    }
     if (stack_at_ && (pc & 0xFFFFFF) == stack_at_ && frames_ >= trace_from_ && stack_left_ > 0) {
         --stack_left_;
         uint32_t sp = reg_get(M68K_REG_SP);
@@ -778,7 +801,11 @@ void System::sub_write8(uint32_t a, uint32_t v) {
         }
         return;
     }
-    if (a >= 0xFF0000 && a < 0xFF4000) { pcm_.write(a & 0x3FFF, uint8_t(v)); return; }
+    if (a >= 0xFF0000 && a < 0xFF4000) {
+        if (trace_audio_ && !(a & 0x2000) && (a & 1)) log("[pcm] frame %llu reg %02x <- %02x\n", (unsigned long long)frames_, (a >> 1) & 0x1F, v & 0xFF);
+        pcm_.write(a & 0x3FFF, uint8_t(v));
+        return;
+    }
     if (a >= 0xFF8000 && a < 0xFF8200) ga_write(kSub, a & 0x7F, uint8_t(v));
 }
 

@@ -236,6 +236,7 @@ private:
     bool trace_audio_ = false;
     uint64_t ym_writes_ = 0;
     uint32_t watch_ = 0, stack_at_ = 0;
+    std::vector<uint32_t> probes_[2];   // SCD_PROBE: PCs per CPU (0 Main, 1 Sub) to log registers at
     int stack_left_ = 20;
     int trace_cpu_ = -1, trace_left_ = 0;
     uint64_t trace_from_ = 0;
