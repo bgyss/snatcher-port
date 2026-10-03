@@ -25,3 +25,6 @@ engine/tests/lift_cases.inc
 
 # Git worktrees created by Claude Code sessions
 .claude/worktrees/
+
+# MAME / emulator screenshots of the game (copyrighted captures, never commit)
+snap/

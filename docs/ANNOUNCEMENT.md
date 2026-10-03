@@ -1,8 +1,8 @@
 # Announcement posts (draft)
 
 > **Status: still testing.** The game boots and plays through the intro into the first in-game scene, but I am
-> still testing the rest of the game. The repo stays private until testing is done; then I will make it public and
-> post the link. Every post below says so, so nobody goes looking for a link that doesn't exist yet.
+> still testing the rest of the game. The repo is public at https://github.com/bgyss/snatcher-port (source and
+> tools only: you need your own disc). Every post says the project is a work in progress.
 
 Facts the posts rely on (all from this repo, so they stay accurate):
 
@@ -68,13 +68,13 @@ story.) To record your own gameplay instead, run `snatcher <cue> --record clip.m
 
 **4/4**
 
-> Still testing the rest of the game. The repo goes public when I'm done, and I'll post it here.
+> Still testing the rest of the game, but the code is up: github.com/bgyss/snatcher-port
 >
 > Snatcher © Konami. A fan project, not affiliated with Konami. #Snatcher #SegaCD #ReverseEngineering #RetroGaming
 
 *Single-post version* (if you don't want a thread):
 
-> I'm reverse-engineering Konami's Snatcher (Sega CD, 1994) into a native Mac/Windows build: it runs the game's own 68000 code, translated to C++ at build time, with the BIOS emulated. Bring your own disc. Still testing; the repo goes public when I'm done. 🎥 #Snatcher #SegaCD
+> I'm reverse-engineering Konami's Snatcher (Sega CD, 1994) into a native Mac/Windows build: it runs the game's own 68000 code, translated to C++ at build time, with the BIOS emulated. Bring your own disc. Still testing. github.com/bgyss/snatcher-port 🎥 #Snatcher #SegaCD
 
 ---
 
@@ -108,7 +108,7 @@ story.) To record your own gameplay instead, run `snatcher <cue> --record clip.m
 > 🔹 **Bring your own disc.** The build reads code and assets from the player's own copy. No game data, BIOS or
 > code derived from them is distributed.
 >
-> I'm still testing the rest of the game. When that's done I'll open-source the repo and share it here.
+> I'm still testing the rest of the game, but the source is open: https://github.com/bgyss/snatcher-port
 >
 > *Snatcher is © Konami. This is a non-commercial fan project, not affiliated with or endorsed by Konami.*
 >
@@ -156,8 +156,8 @@ written for them. For r/SegaCD / r/retrogaming, the first two paragraphs plus th
 >   match. The longer-term plan is a data-driven reimplementation that uses this work as the spec and the emulated core
 >   as the oracle.
 >
-> **Status:** the intro and the start of the game run with audio, but I'm still testing the rest of the game. **The
-> repo isn't public yet.** I'll publish it once testing is done and update this post with the link.
+> **Status:** the intro and the start of the game run with audio, but I'm still testing the rest of the game.
+> **Repo:** https://github.com/bgyss/snatcher-port (source and tools only; it builds against your own disc image).
 >
 > Happy to answer questions about the Sega CD internals, the BIOS HLE or the translator.
 >
@@ -170,4 +170,4 @@ written for them. For r/SegaCD / r/retrogaming, the first two paragraphs plus th
 - [ ] Watch both videos through once (audio on).
 - [ ] X: attach `snatcher-intro-x.mp4` (2:16). LinkedIn/Reddit: `snatcher-intro-full.mp4` (6:58).
 - [ ] Don't link or attach anything from `dist/`: those binaries embed code derived from the disc.
-- [ ] When the repo goes public: reply to the X thread, edit the Reddit post, comment on LinkedIn with the link.
+- [ ] Check the repo page renders (README, no game data) before posting the link.
