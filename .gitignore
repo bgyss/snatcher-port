@@ -22,3 +22,6 @@ ghidra/*.lock*
 engine/build*/
 dist/
 engine/tests/lift_cases.inc
+
+# Git worktrees created by Claude Code sessions
+.claude/worktrees/
