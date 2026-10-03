@@ -16,6 +16,16 @@ bool sub_has(uint32_t pc);
 Exit sub_run(Cpu& c, uint32_t pc, int32_t& budget);
 extern const Span kSubSpans[];
 extern const int kSubSpanCount;
+#ifdef SNATCHER_TRANSLATED_OVL909
+bool ovl909_has(uint32_t pc);
+Exit ovl909_run(Cpu& c, uint32_t pc, int32_t& budget);
+extern const Span kOvl909Ranges[];
+extern const int kOvl909RangeCount;
+extern const uint32_t kOvl909Crc;
+#endif
+extern const Span kSubRanges[];
+extern const int kSubRangeCount;
+extern const uint32_t kSubCrc;
 #ifdef SNATCHER_TRANSLATED_MAIN
 bool main_has(uint32_t pc);
 Exit main_run(Cpu& c, uint32_t pc, int32_t& budget);
@@ -100,6 +110,7 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     disc_ = std::move(disc);
     save_path_ = save_path;
     trace_bios_ = std::getenv("SCD_TRACE_BIOS") != nullptr;
+    ovl_log_ = std::getenv("SCD_OVERLAYS") != nullptr;
 #ifdef SNATCHER_TRANSLATED
     translate_ = std::getenv("SCD_NO_TRANSLATE") == nullptr;
 #endif
@@ -312,6 +323,7 @@ void System::update_main_irq() { refresh_irq(kMain); }
 void System::update_sub_irq() { refresh_irq(kSub); }
 
 void System::trace_pc(uint32_t pc) {
+    if (ovl_log_ && cur_ == kSub && pc >= 0x16700 && pc < 0x80000) ovl_hist_[(pc >> 8) << 8]++;
     if (stack_at_ && (pc & 0xFFFFFF) == stack_at_ && frames_ >= trace_from_ && stack_left_ > 0) {
         --stack_left_;
         uint32_t sp = reg_get(M68K_REG_SP);
@@ -392,6 +404,51 @@ static uint32_t crc32_of(const uint8_t* p, size_t n) {
     return ~crc;
 }
 
+struct TEntry {
+    bool (*has)(uint32_t);
+    lift::Exit (*run)(lift::Cpu&, uint32_t, int32_t&);
+    const lift::Span* ranges;
+    int nranges;
+    uint32_t crc;
+    bool overlay;
+    uint32_t checked_gen = 0xFFFFFFFF;
+    std::vector<uint8_t> state;   // per range: 0 unchecked, 1 ok, 2 differs
+    int last = 0;
+};
+
+static uint32_t crc_range(const uint8_t* mem, uint32_t lo, uint32_t hi) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t a = lo; a < hi; ++a) {
+        crc ^= mem[a];
+        for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1)));
+    }
+    return ~crc;
+}
+
+// True when the code range containing pc is in memory exactly as translated (checked once per range, overlays again after each disc load).
+static bool entry_code_ok(TEntry& e, const uint8_t* mem, uint32_t pc, uint32_t gen) {
+    if (e.checked_gen != gen) { e.checked_gen = gen; e.state.assign(size_t(e.nranges), 0); }
+    if (!(pc >= e.ranges[e.last].lo && pc < e.ranges[e.last].hi)) {
+        int lo = 0, hi = e.nranges - 1, found = -1;
+        while (lo <= hi) { int m = (lo + hi) / 2; if (pc < e.ranges[m].lo) hi = m - 1; else if (pc >= e.ranges[m].hi) lo = m + 1; else { found = m; break; } }
+        if (found < 0) return false;
+        e.last = found;
+    }
+    uint8_t& st = e.state[size_t(e.last)];
+    if (st == 0) st = crc_range(mem, e.ranges[e.last].lo, e.ranges[e.last].hi) == e.ranges[e.last].crc ? 1 : 2;
+    return st == 1;
+}
+
+static std::vector<TEntry>& sub_entries() {
+    static std::vector<TEntry> e = {
+        {lift::sub_has, lift::sub_run, lift::kSubRanges, lift::kSubRangeCount, lift::kSubCrc, false},
+#ifdef SNATCHER_TRANSLATED_OVL909
+        {lift::ovl909_has, lift::ovl909_run, lift::kOvl909Ranges, lift::kOvl909RangeCount, lift::kOvl909Crc, true},
+#endif
+    };
+    return e;
+}
+
 // Runs the Sub CPU for `cycles`, executing translated code where available and falling back to Musashi per instruction.
 // Returns cycles actually used. cur_ must be kSub.
 int System::run_sub_translated(int cycles) {
@@ -404,28 +461,22 @@ int System::run_sub_translated(int cycles) {
         uint32_t pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
         uint32_t sr = reg_get(M68K_REG_SR);
         bool irq_blocked = sub_irq_level() <= int((sr >> 8) & 7);
-        if (irq_blocked && lift::sub_has(pc)) {
+        TEntry* te = nullptr;
+        if (irq_blocked) {
+            for (auto& e : sub_entries()) if (e.has(pc)) { te = &e; break; }
+        }
+        if (te) {
             for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
             c.set_ccr(sr & 0x1F);
             c.sr_sys = uint16_t(sr & 0xA700);
-            // Verify once that the code in memory is what was translated.
-            for (int i = 0; i < lift::kSubSpanCount; ++i) {
-                const lift::Span& sp = lift::kSubSpans[i];
-                if (pc >= sp.lo && pc < sp.hi && !span_checked_[i]) {
-                    span_checked_[i] = true;
-                    span_ok_[i] = crc32_of(prg_ram_ + sp.lo, sp.hi - sp.lo) == sp.crc;
-                    if (!span_ok_[i]) log("[translate] code at %06x differs from the translated image; using the interpreter there\n", sp.lo);
-                }
-            }
-            bool ok = true;
-            for (int i = 0; i < lift::kSubSpanCount; ++i)
-                if (pc >= lift::kSubSpans[i].lo && pc < lift::kSubSpans[i].hi) ok = span_ok_[i];
+            // The code bytes in memory must be the ones that were translated (overlays are re-checked after every disc load into PRG RAM).
+            bool ok = entry_code_ok(*te, prg_ram_, pc, te->overlay ? prg_ovl_gen_ : 0);
             if (ok) {
                 int32_t before = budget;
                 lift::Cpu saved = c;
                 uint32_t spc = pc;
                 if (verify) { bus.logging = true; bus.writes.clear(); budget = 1; before = 1; }
-                lift::Exit ex = lift::sub_run(c, pc, budget);
+                lift::Exit ex = te->run(c, pc, budget);
                 if (verify && ex.kind != lift::Exit::NotTranslated && ex.kind != lift::Exit::Unsupported) {
                     // Undo the writes, replay the same instruction in Musashi, compare.
                     auto writes = bus.writes; bus.logging = false;
@@ -433,9 +484,10 @@ int System::run_sub_translated(int cycles) {
                     for (size_t i = 0; i < writes.size(); ++i) after[i] = uint8_t(sub_read8(writes[i].first));
                     for (size_t i = writes.size(); i-- > 0;) sub_write8(writes[i].first, writes[i].second);
                     for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, saved.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, saved.a[i]); }
-                    reg_set(M68K_REG_SP, saved.a[7]); reg_set(M68K_REG_SR, saved.sr_sys | saved.ccr()); reg_set(M68K_REG_PC, spc);
+                    reg_set(M68K_REG_SR, saved.sr_sys | saved.ccr()); reg_set(M68K_REG_SP, saved.a[7]); reg_set(M68K_REG_PC, spc);
                     m68k_execute(1);
                     bool bad = false;
+                    for (auto& w : writes) if (w.first >= 0xFE0000) bad = true;   // I/O side effects (gate array, PCM, BRAM) make a replay meaningless
                     for (int i = 0; i < 8 && !bad; ++i) {
                         uint32_t m = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP);
                         if (reg_get(M68K_REG_D0 + i) != c.d[i]) { log("[lift-verify] pc=%06x op=%04x d%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.d[i], reg_get(M68K_REG_D0 + i)); bad = true; }
@@ -485,7 +537,7 @@ int System::run_main_translated(int cycles) {
                 const lift::Span& sp = lift::kMainSpans[i];
                 if (pc >= sp.lo && pc < sp.hi && !main_span_checked_) {
                     main_span_checked_ = true;
-                    main_span_ok_ = crc32_of(main_ram_ + (sp.lo & 0xFFFF), sp.hi - sp.lo) == sp.crc;
+                    main_span_ok_ = crc_range(main_ram_, sp.lo & 0xFFFF, sp.hi & 0xFFFF ? (sp.hi & 0xFFFF) : 0x10000) == sp.crc;
                     if (!main_span_ok_) log("[translate] Main code differs from the translated image; using the interpreter\n");
                 }
             }
@@ -953,6 +1005,7 @@ void System::cdc_do_transfer() {
             break;
         }
         case 5:  // PRG RAM
+            if (base + kUserData > 0x28000) ++prg_ovl_gen_;
             for (int i = 0; i < kUserData; ++i) prg_ram_[(base + i) & 0x7FFFF] = cdc_buf_[i];
             break;
         case 7:  // Word RAM
@@ -993,6 +1046,7 @@ void System::cdbios(int fn) {
         case 0x20: {                                                           // ROMREADN
             cdc_lba_ = (uint32_t(sub_read8(a0)) << 24) | (sub_read8(a0 + 1) << 16) | (sub_read8(a0 + 2) << 8) | sub_read8(a0 + 3);
             cdc_remaining_ = (uint32_t(sub_read8(a0 + 4)) << 24) | (sub_read8(a0 + 5) << 16) | (sub_read8(a0 + 6) << 8) | sub_read8(a0 + 7);
+            if (ovl_log_) { cur_load_lba_ = cdc_lba_; log("[load] lba=%u count=%u frame %llu\n", cdc_lba_, cdc_remaining_, (unsigned long long)frames_); }
             if (trace_bios_) log("  ROMREADN lba=%u count=%u (frame %llu)\n", cdc_lba_, cdc_remaining_, (unsigned long long)frames_);
             {
                 // 1x drive: 75 sectors/s, plus a seek when the read is not a continuation of the last one.
@@ -1269,6 +1323,32 @@ std::string System::comm_string() const {
     return std::string(buf);
 }
 
+void System::dump_overlay_hist() {
+    for (auto& kv : ovl_hist_) log("[ovl-exec] page %06x hits %llu\n", kv.first, (unsigned long long)kv.second);
+}
+
+// Exercises the backup RAM emulation like the game does (write, verify, read, delete) and checks the image survives a reload.
+bool System::bram_selftest() {
+    select_cpu(kSub);
+    const uint32_t hdr = 0x9000, data = 0x9100, out = 0x9400;
+    const char name[] = "SNATCHER_00";
+    for (int i = 0; i < 11; ++i) sub_write8(hdr + i, uint8_t(name[i]));
+    sub_write8(hdr + 11, 0xFF); sub_write8(hdr + 12, 0); sub_write8(hdr + 13, 14);
+    for (int i = 0; i < 448; ++i) sub_write8(data + i, uint8_t(i * 7 + 3));
+    auto call = [&](int fn, uint32_t a0, uint32_t a1) {
+        reg_set(M68K_REG_A0, a0); reg_set(M68K_REG_A1, a1); reg_set(M68K_REG_D1, 0);
+        buram(fn);
+        return !(reg_get(M68K_REG_SR) & 1);
+    };
+    bool ok = call(0, 0x9800, 0x9a00) && call(4, hdr, data) && call(8, hdr, data);
+    bram_files_.clear();
+    bram_load();                                   // reload from the serialised image
+    ok = ok && bram_files_.size() == 1 && call(3, hdr, out);
+    for (int i = 0; i < 448 && ok; ++i) ok = sub_read8(out + i) == uint8_t(i * 7 + 3);
+    ok = ok && call(5, hdr, 0) && !call(2, hdr, out) && bram_files_.empty();
+    return ok;
+}
+
 void System::dump_state() {
     Cpu keep = cur_;
     for (int i = 0; i < 2; ++i) {
@@ -1335,9 +1415,11 @@ void System::audio_run(int samples) {
         }
         if (psg_n) psg_s_ = int16_t(psg_acc / psg_n);
 
-        int l = ym_l_ + pcm_l_ + psg_s_ / 2;
-        int r = ym_r_ + pcm_r_ + psg_s_ / 2;
-        if (cdda_playing_) {
+        static const char* mute = std::getenv("SCD_MUTE");
+        auto on = [&](const char* n) { return !mute || !std::strstr(mute, n); };
+        int l = (on("ym") ? ym_l_ : 0) + (on("pcm") ? pcm_l_ : 0) + (on("psg") ? psg_s_ / 2 : 0);
+        int r = (on("ym") ? ym_r_ : 0) + (on("pcm") ? pcm_r_ : 0) + (on("psg") ? psg_s_ / 2 : 0);
+        if (cdda_playing_ && on("cdda")) {
             if (cdda_pos_ >= kRawSector) cdda_fetch();
             if (cdda_playing_) {
                 // 44.1 kHz source consumed with a simple accumulator.
@@ -1345,8 +1427,8 @@ void System::audio_run(int samples) {
                 phase += 44100.0 / kSampleRate;
                 int16_t sl = int16_t(cdda_raw_[cdda_pos_] | cdda_raw_[cdda_pos_ + 1] << 8);
                 int16_t sr = int16_t(cdda_raw_[cdda_pos_ + 2] | cdda_raw_[cdda_pos_ + 3] << 8);
-                l += sl;
-                r += sr;
+                l += sl / 2;   // MAME mixes CD-DA at half scale; full scale clips on hot masters
+                r += sr / 2;
                 while (phase >= 1.0) {
                     phase -= 1.0;
                     cdda_pos_ += 4;

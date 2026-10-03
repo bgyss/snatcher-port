@@ -28,6 +28,7 @@ def main():
         "scd_main_ip.bin": boot[0x200:0x6800],
         "scd_sub_sp.bin": boot[0x6800:0x8000],
     }
+    blobs["ovl_909.bin"] = t.read(909, 49 * 2048)   # raw-area overlay loaded to Sub $28000 after the Konami logo (not an ISO file)
     pvd = t.sector(16)
     root = pvd[156:190]
     for name, lba, size in iso_walk(t, struct.unpack("<I", root[2:6])[0],

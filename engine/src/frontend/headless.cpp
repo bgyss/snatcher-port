@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
     auto disc = Disc::open(cue, &err);
     if (!disc) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
     System& sys = System::instance();
-    if (!sys.init(std::move(disc), "", &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    if (!sys.init(std::move(disc), std::getenv("SCD_SAVE") ? std::getenv("SCD_SAVE") : "", &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     const int profile_from = std::getenv("SCD_PROFILE") ? std::atoi(std::getenv("SCD_PROFILE")) : -1;
     if (const char* t = std::getenv("SCD_TRACE")) {  // cpu:frame:count
@@ -88,6 +88,7 @@ int main(int argc, char** argv) {
         if (std::sscanf(t, "%d:%llu:%d", &cpu, &fr, &n) == 3) sys.set_trace(cpu, fr, n);
     }
     if (std::getenv("SCD_STACKAT") && std::getenv("SCD_FROM")) sys.set_trace_from(std::strtoull(std::getenv("SCD_FROM"), nullptr, 10));
+    if (std::getenv("SCD_BRAM_SELFTEST")) { bool ok = sys.bram_selftest(); sys.shutdown(); std::printf("backup RAM selftest: %s\n", ok ? "PASS" : "FAIL"); return ok ? 0 : 1; }
     std::vector<int16_t> all_audio;
     for (int f = 0; f < frames && !sys.halted(); ++f) {
         uint16_t pad = 0;
@@ -125,14 +126,23 @@ int main(int argc, char** argv) {
                 q = *e ? e + 1 : e;
             }
         }
+        if (const char* dp = std::getenv("SCD_DUMP_PRG")) {  // frame:hexaddr:hexlen:path
+            unsigned long fr, ad, ln; char path[512];
+            if (std::sscanf(dp, "%lu:%lx:%lx:%511s", &fr, &ad, &ln, path) == 4 && unsigned(f + 1) == fr) {
+                FILE* o = std::fopen(path, "wb");
+                std::fwrite(sys.prg_ram() + ad, 1, ln, o);
+                std::fclose(o);
+            }
+        }
         if (ppm_every && f % ppm_every == 0) {
             char name[64];
             std::snprintf(name, sizeof name, "/frame_%05d.ppm", f);
             write_ppm(out + name, sys.framebuffer(), sys.width(), sys.height());
         }
     }
-    if (std::getenv("SCD_DEBUG")) { sys.dump_state(); std::fprintf(stderr, "YM writes: %llu\n", (unsigned long long)sys.ym_write_count()); }
+    if (std::getenv("SCD_DEBUG")) { sys.dump_state(); std::fprintf(stderr, "YM writes: %llu translated=%d fallback_steps=%llu verified=%llu\n", (unsigned long long)sys.ym_write_count(), int(sys.translated()), (unsigned long long)sys.fallback_steps(), (unsigned long long)sys.verified_count()); }
     if (profile_from >= 0) sys.dump_profile(12);
+    if (std::getenv("SCD_OVERLAYS")) sys.dump_overlay_hist();
     if (std::getenv("SCD_DUMP_RAM")) {
         auto dump = [&](const char* n, const uint8_t* p, size_t len) { FILE* f = std::fopen((out + n).c_str(), "wb"); std::fwrite(p, 1, len, f); std::fclose(f); };
         dump("/main_ram.bin", sys.main_ram(), 0x10000);

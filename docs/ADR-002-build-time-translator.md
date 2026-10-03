@@ -40,3 +40,13 @@ extension-word forms reliably, so the decoder needs its own instruction table (a
   `System::run_main_translated` mirrors the Sub path (word accesses stay word accesses for the VDP ports, DMA stalls are charged to the translated budget).
 - Title screen still 100.00% pixel-identical to MAME and the scripted playthrough still reaches the first in-game screen with both CPUs translated.
 - Windows and Mac builds regenerate both translations from `extracted/code` at build time.
+
+## Overlay (2026-10-02)
+- The `$28000` overlay loaded after the Konami logo (disc LBA 909, 49 sectors, outside the ISO file list) is **compressed on disc**; the Sub decompresses it in place. The translator therefore
+  reads a runtime dump (`SCD_DUMP_PRG=frame:addr:len:path`, taken at frame 1500 from the interpreter build) as `extracted/code/ovl_909.bin`; `tools/extract_code.py` writes the raw sectors and the
+  dump replaces them. 1,883 instructions reachable from 1,091 seed addresses (linear-scan seeds, over-approximate by design).
+- Runtime: every translated code range carries its own CRC; ranges are checked on first use, and overlay ranges again after each disc DMA into PRG RAM `>= $28000`. Mismatch -> interpreter.
+- The intro overlay is the only code that ever executes at `$28000` in the title -> options -> story -> first game screen run (execution histogram, `SCD_OVERLAYS=1`).
+  `DATA_*` packs are compressed graphics, not code; later gameplay may load more code and will simply run in the interpreter until profiled.
+- `SCD_LIFT_VERIFY=1` over 2.88 M translated instructions: only `rte` differs, a replay artifact (Musashi stack/privilege handling); I/O writes are excluded from the replay.
+- Audio: CD-DA is mixed at half scale like MAME (full scale clipped); FM and PCM are silent in the first 7000 frames so remain unverified. Backup RAM write/verify/read/delete and image reload pass `SCD_BRAM_SELFTEST=1`; the file keeps the real header layout.

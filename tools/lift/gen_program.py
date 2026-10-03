@@ -8,6 +8,7 @@ from m68k_decode import decode, hx
 from emit import flow_code
 
 PROGRAMS = {
+    'ovl909': dict(regions=[('ovl_909.bin', 0x28000)], entries=[], vectors=False, mask=0xFFFFFF, lo_code=0x28000, scan=(0x28000, 0x2C000)),
     'sub': dict(regions=[('scd_sub_sp.bin', 0x6000), ('scd_subcode.bin', 0xD400)],
                 entries=[0x602A, 0x602E, 0x60A8, 0x60BE, 0x629C], vectors=True, mask=0xFFFFFF, lo_code=0x6000),
     'main': dict(regions=[('scd_main_ip.bin', 0xFF0000)],
@@ -59,6 +60,17 @@ def main():
                 v = r32(a + 2) & 0xFFFFFF
                 if in_code(v) and (v >= cfg['lo_code']): entries.add(v)
 
+    if cfg.get('scan'):
+        lo, hi = cfg['scan']
+        for a in range(lo, hi, 2):
+            if not in_code(a): continue
+            p, n, ok, term = a, 0, True, False
+            while n < 40:
+                i = decode(r16, p)
+                if i.code and i.code[0].startswith('/* unsupported'): ok = False; break
+                n += 1; p += i.size
+                if i.flow in (('ret',), ('jump_dyn',)) or (isinstance(i.flow, tuple) and i.flow[0] == 'goto'): term = True; break
+            if ok and term and n >= 4: entries.add(a)
     insns = {}
     work = sorted(entries)
     tables = 0
@@ -135,6 +147,16 @@ def main():
     out.append('bool %s_has(uint32_t pc)' % prog + ' {\n    switch (pc) {')
     for pc in order: out.append('        case 0x%X:' % pc)
     out.append('            return true;\n        default: return false;\n    }\n}\n')
+    # merged instruction byte ranges: the runtime checks that these bytes in memory are what was translated
+    rngs = []
+    for pc in order:
+        a, b = pc, pc + insns[pc].size
+        if rngs and rngs[-1][1] == a: rngs[-1][1] = b
+        else: rngs.append([a, b])
+    crcdata = b''.join(bytes(mem.get(x, 0) for x in range(a, b)) for a, b in rngs)
+    out.append('extern const Span k%sRanges[] = {' % prog.capitalize())
+    for a, b in rngs: out.append('    {0x%X, 0x%X, 0x%08X},' % (a, b, zlib.crc32(bytes(mem.get(x, 0) for x in range(a, b))) & 0xFFFFFFFF))
+    out.append('};\nextern const int k%sRangeCount = %d;\nextern const uint32_t k%sCrc = 0x%08X;\n' % (prog.capitalize(), len(rngs), prog.capitalize(), zlib.crc32(crcdata) & 0xFFFFFFFF))
     out.append('extern const Span k%sSpans[] = {' % prog.capitalize())
     for lo, hi, crc, f in spans: out.append('    {0x%X, 0x%X, 0x%08X},  // %s' % (lo, hi, crc, f))
     out.append('};\nextern const int k%sSpanCount = %d;\n' % (prog.capitalize(), len(spans)))

@@ -50,6 +50,7 @@ public:
     uint64_t ym_write_count() const { return ym_writes_; }
     bool translated() const { return translate_; }
     uint64_t fallback_steps() const { return fallback_steps_; }
+    uint64_t verified_count() const { return verified_; }
     bool halted() const { return halted_; }
     uint8_t* main_ram() { return main_ram_; }
     uint8_t* prg_ram() { return prg_ram_; }
@@ -57,8 +58,10 @@ public:
     Vdp& vdp() { return vdp_; }
     // Prints PCs and key registers of both CPUs to stderr.
     void dump_state();
+    bool bram_selftest();
     void enable_profile(bool on) { profile_ = on; pc_hist_[0].clear(); pc_hist_[1].clear(); }
     void dump_profile(int top);
+    void dump_overlay_hist();
     // Per-instruction trace of one CPU (0 = Main, 1 = Sub) starting at a frame.
     void set_trace(int cpu, uint64_t from_frame, int count) { trace_cpu_ = cpu; trace_from_ = from_frame; trace_left_ = count; }
     void set_trace_from(uint64_t f) { trace_from_ = f; }
@@ -78,6 +81,7 @@ private:
     friend struct SubBusAdapter;
     friend struct MainBusAdapter;
     int run_sub_translated(int cycles);
+    uint32_t prg_ovl_gen_ = 0;
     int run_main_translated(int cycles);
     int32_t* main_budget_ = nullptr;
     bool main_span_checked_ = false, main_span_ok_ = false;
@@ -220,6 +224,9 @@ private:
 
     bool trace_bios_ = false;
     bool profile_ = false;
+    bool ovl_log_ = false;
+    uint32_t cur_load_lba_ = 0;
+    std::map<uint32_t, uint64_t> ovl_hist_;
     bool trace_audio_ = false;
     uint64_t ym_writes_ = 0;
     uint32_t watch_ = 0, stack_at_ = 0;
