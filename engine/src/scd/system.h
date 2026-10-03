@@ -38,6 +38,9 @@ public:
     int height() const { return vdp_.height(); }
     const uint32_t* framebuffer() const { return vdp_.framebuffer(); }
     void set_pad(int port, uint16_t buttons) { pad_[port & 1] = buttons; }
+    // Konami Justifier on port 2. x,y are in game screen pixels; buttons: bit0 trigger, bit1 start.
+    void set_gun_connected(bool on) { gun_connected_ = on; }
+    void set_gun(int x, int y, bool inside, uint8_t buttons) { gun_x_ = x; gun_y_ = y; gun_inside_ = inside; gun_buttons_ = buttons; }
 
     // Interleaved stereo samples produced since the last call.
     std::vector<int16_t>& audio() { return audio_; }
@@ -191,6 +194,9 @@ private:
 
     // Controllers
     uint16_t pad_[2] = {0, 0};
+    bool gun_connected_ = false, gun_inside_ = false;
+    int gun_x_ = 0, gun_y_ = 0;
+    uint8_t gun_buttons_ = 0;
     uint8_t io_data_[3] = {0x7F, 0x7F, 0x7F};
     uint8_t io_ctrl_[3] = {0, 0, 0};
 

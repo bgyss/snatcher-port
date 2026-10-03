@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
     }
     if (std::getenv("SCD_STACKAT") && std::getenv("SCD_FROM")) sys.set_trace_from(std::strtoull(std::getenv("SCD_FROM"), nullptr, 10));
     if (std::getenv("SCD_BRAM_SELFTEST")) { bool ok = sys.bram_selftest(); sys.shutdown(); std::printf("backup RAM selftest: %s\n", ok ? "PASS" : "FAIL"); return ok ? 0 : 1; }
+    if (const char* g = std::getenv("SCD_GUN")) { int gx, gy; if (std::sscanf(g, "%d,%d", &gx, &gy) == 2) { sys.set_gun_connected(true); sys.set_gun(gx, gy, true, 0); } }
     std::vector<int16_t> all_audio;
     for (int f = 0; f < frames && !sys.halted(); ++f) {
         uint16_t pad = 0;

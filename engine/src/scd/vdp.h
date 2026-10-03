@@ -32,6 +32,9 @@ public:
 
     // 0 = no interrupt; otherwise the 68000 level (6 = VINT, 4 = HINT).
     int irq_level() const;
+    // Light gun: the beam passed the sensor at (x, line): latch the H/V counters and request the external interrupt (level 2).
+    void light_pen_hit(int x, int line);
+    bool hv_latch_enabled() const { return reg_[0] & 0x02; }
     void irq_ack(int level);
 
     int width() const { return (reg_[12] & 0x81) ? 320 : 256; }
@@ -73,6 +76,8 @@ private:
     bool dma_fill_pending_ = false;
     bool vint_pending_ = false;
     bool vint_arm_ = false;
+    bool ext_pending_ = false;
+    uint16_t hv_latched_ = 0;
     int dma_stall_ = 0;
     bool hint_pending_ = false;
     bool vblank_ = false;

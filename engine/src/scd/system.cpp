@@ -308,7 +308,7 @@ void System::refresh_irq(Cpu c) {
 
 int System::main_irq_level() const {
     int v = vdp_.irq_level();
-    if (v) return v;
+    if (v) return v;                              // 6, 4 or 2 (light pen)
     if (main_int2_pending_ && ien2_) return 2;
     return 0;
 }
@@ -343,7 +343,7 @@ int System::int_ack(int level) {
         if (trace_bios_ && level == 4) log("[hint] frame %llu line %d vec=%04x e06c=%02x%02x e034=%02x%02x r0=%02x ef00=%02x%02x\n", (unsigned long long)frames_, line_, hint_vec_, main_ram_[0xe06c], main_ram_[0xe06d], main_ram_[0xe034], main_ram_[0xe035], vdp_.reg(0), main_ram_[0xef00], main_ram_[0xef01]);
         if (trace_bios_ && level == 6) log("[vint] frame %llu line %d e06c=%02x%02x e062=%02x%02x r0=%02x ef00=%02x%02x e028=%02x\n", (unsigned long long)frames_, line_, main_ram_[0xe06c], main_ram_[0xe06d], main_ram_[0xe062], main_ram_[0xe063], vdp_.reg(0), main_ram_[0xef00], main_ram_[0xef01], main_ram_[0xe028]);
         if (level == 6 || level == 4) vdp_.irq_ack(level);
-        else if (level == 2) main_int2_pending_ = false;
+        else if (level == 2) { main_int2_pending_ = false; vdp_.irq_ack(2); }
         refresh_irq(kMain);
     } else {
         sub_pending_ &= ~(1 << level);
@@ -602,6 +602,7 @@ void System::run_frame() {
             if (s == 0) { vdp_.line_progress(); refresh_irq(kMain); }
         }
         if (line_ < active) vdp_.render_line(line_);
+        if (gun_connected_ && gun_inside_ && line_ == gun_y_ && vdp_.hv_latch_enabled()) vdp_.light_pen_hit(gun_x_, line_);
         audio_frac_ += double(kSampleRate) / (60.0 * kLines);
         int n = int(audio_frac_);
         audio_frac_ -= n;
@@ -881,8 +882,17 @@ void System::ga_write(Cpu who, uint32_t off, uint8_t v) {
 uint8_t System::io_read(uint32_t reg) {
     switch (reg) {
         case 0x01: return 0x81;  // overseas, NTSC, Mega-CD attached
-        case 0x03:
-        case 0x05: {
+        case 0x05:
+            if (gun_connected_) {
+                // Justifier: low nibble answers the ID probe (TH high -> 0, TH low -> buttons, active low, bit2 = 0 gives ID 1).
+                bool th = io_data_[1] & 0x40;
+                uint8_t low = th ? 0x00 : uint8_t(0x03 & ~(gun_buttons_ & 3));
+                uint8_t v = uint8_t(low | (io_data_[1] & io_ctrl_[1] & 0x70) | ((io_ctrl_[1] & 0x40) ? 0 : 0x40));
+                if (io_ctrl_[1] & 0x40) v |= io_data_[1] & 0x40;
+                return v;
+            }
+            [[fallthrough]];
+        case 0x03: {
             int p = reg == 0x03 ? 0 : 1;
             uint16_t b = pad_[p];
             uint8_t th = io_data_[p] & 0x40;

@@ -79,6 +79,7 @@ uint16_t Vdp::read_status() {
 }
 
 uint16_t Vdp::read_hv(int line, int cycle_in_line, int cycles_per_line) {
+    if (reg_[0] & 0x02) return hv_latched_;   // HV counter latch enabled: the light pen position
     int v = line;
     if (v > 0xEA) v -= 6;  // NTSC V28 counter jump (262-line frame)
     int h = cycle_in_line * 0xB6 / cycles_per_line;
@@ -210,12 +211,22 @@ void Vdp::dma_copy() {
 int Vdp::irq_level() const {
     if (vint_pending_ && (reg_[1] & 0x20)) return 6;
     if (hint_pending_ && (reg_[0] & 0x10)) return 4;
+    if (ext_pending_ && (reg_[11] & 0x08)) return 2;
     return 0;
+}
+
+void Vdp::light_pen_hit(int x, int line) {
+    const int h40 = width() == 320;
+    int hc = (x >> 1) + (h40 ? 0x08 : 0x0A);
+    hv_latched_ = uint16_t(((line & 0xFF) << 8) | (hc & 0xFF));
+    ext_pending_ = true;
+    update_irq();
 }
 
 void Vdp::irq_ack(int level) {
     if (level == 6) vint_pending_ = false;
     else if (level == 4) hint_pending_ = false;
+    else if (level == 2) ext_pending_ = false;
 }
 
 void Vdp::begin_line(int line) {

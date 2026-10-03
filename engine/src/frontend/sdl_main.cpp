@@ -1,5 +1,6 @@
 // SDL3 front-end: window, audio, keyboard and gamepad input for the Sega CD core.
-//   snatcher <disc.cue>      (or drop a .cue file onto the window)
+//   snatcher <disc.cue> [--justifier]   (or drop a .cue file onto the window)
+//   --justifier: mouse is the Konami Justifier on port 2 (left = trigger, right = start)
 #include <SDL3/SDL.h>
 
 #include <cstdio>
@@ -94,7 +95,11 @@ int main(int argc, char** argv) {
     }
 
     bool running_game = false;
-    if (argc > 1) boot(argv[1], &running_game);
+    bool gun = false;
+    std::string disc;
+    for (int i = 1; i < argc; ++i) { if (std::string(argv[i]) == "--justifier") gun = true; else disc = argv[i]; }
+    if (!disc.empty()) boot(disc, &running_game);
+    System::instance().set_gun_connected(gun);   // the controller ID is read at boot: start with --justifier to get the Gun Adjust option
     SDL_SetWindowTitle(window, running_game ? "Snatcher" : "Snatcher - drop a .cue file on this window");
 
     bool quit = false;
@@ -114,6 +119,14 @@ int main(int argc, char** argv) {
         if (running_game) {
             System& sys = System::instance();
             sys.set_pad(0, keyboard_buttons() | gamepad_buttons(pad));
+            if (gun) {
+                float mx, my;
+                uint32_t mb = SDL_GetMouseState(&mx, &my);
+                SDL_RenderCoordinatesFromWindow(renderer, mx, my, &mx, &my);   // letterboxed 320x240 logical space
+                int gx = int(mx * sys.width() / 320.0f), gy = int(my * sys.height() / 240.0f);
+                bool inside = mx >= 0 && my >= 0 && gx < sys.width() && gy < sys.height();
+                sys.set_gun(gx, gy, inside, uint8_t(((mb & SDL_BUTTON_LMASK) ? 1 : 0) | ((mb & SDL_BUTTON_RMASK) ? 2 : 0)));
+            }
             // Audio-paced: keep roughly 3 frames of audio queued.
             const int target_bytes = kSampleRate / 20 * 4;
             if (!audio || SDL_GetAudioStreamQueued(audio) < target_bytes) {
