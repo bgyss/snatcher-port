@@ -34,3 +34,9 @@ extension-word forms reliably, so the decoder needs its own instruction table (a
   It checks once that the code in PRG RAM matches the translated image (CRC). `SCD_NO_TRANSLATE=1` forces the interpreter; `SCD_LIFT_VERIFY=1` re-executes every translated instruction in Musashi and reports mismatches.
 - Result: title screen 100.00% pixel-identical to MAME with the Sub CPU running translated C++; the scripted run through Options, the story text and the first in-game screen matches the interpreter build.
 - Not translated yet: the Main CPU IP (`$FF0000`), the `$28000` overlays and the Main code copied to `$FFE100`; these still run in Musashi. Coverage of reachable SUBCODE is partial (jump tables are heuristic).
+
+## Main CPU (2026-10-02)
+- `gen_program.py <out> <code dir> main` translates the IP at `$FF0000` (4,189 instructions, 131 entry points incl. RAM vector tables and H-INT vector words);
+  `System::run_main_translated` mirrors the Sub path (word accesses stay word accesses for the VDP ports, DMA stalls are charged to the translated budget).
+- Title screen still 100.00% pixel-identical to MAME and the scripted playthrough still reaches the first in-game screen with both CPUs translated.
+- Windows and Mac builds regenerate both translations from `extracted/code` at build time.

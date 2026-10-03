@@ -1,5 +1,6 @@
 // Differential test: every translated instruction (lift_cases.inc, generated from your disc) against Musashi on random states.
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include "cpu68k.h"

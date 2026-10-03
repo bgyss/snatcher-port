@@ -76,7 +76,11 @@ private:
     System() = default;
     enum Cpu { kMain = 0, kSub = 1 };
     friend struct SubBusAdapter;
+    friend struct MainBusAdapter;
     int run_sub_translated(int cycles);
+    int run_main_translated(int cycles);
+    int32_t* main_budget_ = nullptr;
+    bool main_span_checked_ = false, main_span_ok_ = false;
     bool translate_ = false;
     bool span_ok_[4] = {false, false, false, false};
     bool span_checked_[4] = {false, false, false, false};

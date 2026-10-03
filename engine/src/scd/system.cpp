@@ -16,6 +16,12 @@ bool sub_has(uint32_t pc);
 Exit sub_run(Cpu& c, uint32_t pc, int32_t& budget);
 extern const Span kSubSpans[];
 extern const int kSubSpanCount;
+#ifdef SNATCHER_TRANSLATED_MAIN
+bool main_has(uint32_t pc);
+Exit main_run(Cpu& c, uint32_t pc, int32_t& budget);
+extern const Span kMainSpans[];
+extern const int kMainSpanCount;
+#endif
 }  // namespace lift
 #endif
 
@@ -352,6 +358,7 @@ void System::advance_sub_time(int cycles) {
 
 
 #ifdef SNATCHER_TRANSLATED
+struct MainBusAdapter;
 struct SubBusAdapter : lift::Bus {
     System& s;
     explicit SubBusAdapter(System& sys) : s(sys) {}
@@ -367,6 +374,16 @@ struct LogBus : SubBusAdapter {
     std::vector<std::pair<uint32_t, uint8_t>> writes;  // address, old value
     void w8(uint32_t a, uint8_t v) override { if (logging) writes.push_back({a & 0xFFFFFF, r8(a)}); SubBusAdapter::w8(a, v); }
     void w16(uint32_t a, uint16_t v) override { w8(a, v >> 8); w8(a + 1, v & 0xFF); }
+};
+
+// Main bus: word accesses must stay word accesses (VDP ports).
+struct MainBusAdapter : lift::Bus {
+    System& s;
+    explicit MainBusAdapter(System& sys) : s(sys) {}
+    uint8_t r8(uint32_t a) override { return uint8_t(s.main_read8(a)); }
+    uint16_t r16(uint32_t a) override { return uint16_t(s.main_read16(a)); }
+    void w8(uint32_t a, uint8_t v) override { s.main_write8(a, v); }
+    void w16(uint32_t a, uint16_t v) override { s.main_write16(a, v); }
 };
 
 static uint32_t crc32_of(const uint8_t* p, size_t n) {
@@ -452,6 +469,49 @@ int System::run_sub_translated(int cycles) {
 }
 #endif
 
+#ifdef SNATCHER_TRANSLATED_MAIN
+int System::run_main_translated(int cycles) {
+    static MainBusAdapter bus(*this);
+    lift::Cpu c;
+    c.bus = &bus;
+    int32_t budget = cycles;
+    main_budget_ = &budget;
+    while (budget > 0) {
+        uint32_t pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
+        uint32_t sr = reg_get(M68K_REG_SR);
+        bool irq_blocked = main_irq_level() <= int((sr >> 8) & 7);
+        if (irq_blocked && lift::main_has(pc)) {
+            for (int i = 0; i < lift::kMainSpanCount; ++i) {
+                const lift::Span& sp = lift::kMainSpans[i];
+                if (pc >= sp.lo && pc < sp.hi && !main_span_checked_) {
+                    main_span_checked_ = true;
+                    main_span_ok_ = crc32_of(main_ram_ + (sp.lo & 0xFFFF), sp.hi - sp.lo) == sp.crc;
+                    if (!main_span_ok_) log("[translate] Main code differs from the translated image; using the interpreter\n");
+                }
+            }
+            if (main_span_ok_) {
+                for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
+                c.set_ccr(sr & 0x1F);
+                c.sr_sys = uint16_t(sr & 0xA700);
+                lift::Exit ex = lift::main_run(c, pc, budget);
+                for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, c.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, c.a[i]); }
+                reg_set(M68K_REG_SP, c.a[7]);
+                reg_set(M68K_REG_SR, c.sr_sys | c.ccr());
+                reg_set(M68K_REG_PC, ex.pc);
+                if (ex.kind == lift::Exit::Budget) break;
+                if (halted_) break;
+            }
+        }
+        ++fallback_steps_;
+        int used = m68k_execute(1);
+        budget -= used > 0 ? used : 4;
+        if (halted_) break;
+    }
+    main_budget_ = nullptr;
+    return cycles - budget;
+}
+#endif
+
 void System::run_cpu(Cpu c, int cycles) {
     if (c == kSub && (!sub_run_ || sub_wait_vsync_)) {
         advance_sub_time(cycles);
@@ -465,6 +525,9 @@ void System::run_cpu(Cpu c, int cycles) {
     int used;
 #ifdef SNATCHER_TRANSLATED
     used = (c == kSub && translate_) ? run_sub_translated(budget) : m68k_execute(budget);
+#ifdef SNATCHER_TRANSLATED_MAIN
+    if (c == kMain && translate_) used = run_main_translated(budget); else if (c == kMain) used = m68k_execute(budget);
+#endif
 #else
     used = m68k_execute(budget);
 #endif
@@ -611,7 +674,7 @@ void System::main_write16(uint32_t a, uint32_t v) {
         if (r < 4) vdp_.write_data(uint16_t(v));
         else if (r < 8) {
             vdp_.write_ctrl(uint16_t(v));
-            if (int stall = vdp_.take_dma_stall()) m68k_modify_timeslice(-stall);
+            if (int stall = vdp_.take_dma_stall()) { if (main_budget_) *main_budget_ -= stall; else m68k_modify_timeslice(-stall); }
         } else if (r >= 0x10 && r < 0x18) psg_.write(uint8_t(v));
         return;
     }
