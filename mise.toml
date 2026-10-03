@@ -1,0 +1,52 @@
+# Task runner / tool pinning for the decomp. The compilers, SDL3, Ghidra and mingw-w64 come from the Nix flake (flake.nix);
+# mise supplies the Python environment and the project tasks. `mise run setup` then `mise run build`.
+[env]
+SCD_CUE = "sega-cd-eng/Snatcher (Sega CD) (U)-redump.cue"
+SCD_BIN = "sega-cd-eng/Snatcher (Sega CD) (U)-redump.bin"
+_.python.venv = { path = ".venv", create = true }
+
+[tools]
+python = "3.12"
+cmake = "latest"
+# Everything else (clang, mingw-w64, SDL3, ghidra, ffmpeg) is provided by `nix develop`; mise falls through to it when run inside the shell.
+
+[tasks.setup]
+description = "Install Python deps (capstone) into .venv"
+run = "pip install -q capstone"
+
+[tasks.extract]
+description = "Carve IP / SP / SUBCODE from your disc and dump the $28000 overlay (needs the disc in sega-cd-eng/)"
+run = [
+  "python tools/extract_code.py \"$SCD_BIN\"",
+  "cmake -S engine -B engine/build-interp -DCMAKE_BUILD_TYPE=Release",
+  "cmake --build engine/build-interp -j --target scd_headless",
+  "SCD_NO_TRANSLATE=1 SCD_DUMP_PRG=1500:28000:20000:extracted/code/ovl_909.bin engine/build-interp/scd_headless \"$SCD_CUE\" --frames 1500 --out work/out",
+]
+
+[tasks.build]
+description = "Build the translated native front-end (needs `extract` first)"
+run = [
+  "cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release -DSNATCHER_TRANSLATE_DIR=$PWD/extracted/code",
+  "cmake --build engine/build -j",
+]
+
+[tasks.test-lift]
+description = "Differential test: every translated instruction vs Musashi"
+run = [
+  "python tools/lift/gen_tests.py engine/tests/lift_cases.inc 20000",
+  "cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release",
+  "cmake --build engine/build -j --target lift_diff",
+  "engine/build/lift_diff 8",
+]
+
+[tasks."package:mac"]
+description = "Build dist/Snatcher.app"
+run = "tools/package/mac_app.sh"
+
+[tasks."package:windows"]
+description = "Cross-build dist/windows/snatcher.exe (needs mingw-w64 from the Nix shell)"
+run = "tools/package/windows_cross.sh"
+
+[tasks.run]
+description = "Run the game with the mouse as a Justifier on port 2"
+run = "engine/build/snatcher \"$SCD_CUE\" --justifier"

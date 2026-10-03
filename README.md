@@ -44,3 +44,18 @@ tools/emu/mame_debug.sh pce          # PC Engine CD, MAME debugger (needs System
 tools/emu/mame_debug.sh scd          # Sega CD, MAME debugger (needs BIOS mpr-15045b.bin in ~/mame/roms/segacd/)
 open ~/Applications/Mesen.app        # Mesen 2: best PCE CD debugger
 ```
+
+## Build environment
+
+```sh
+nix develop            # compilers, SDL3, Ghidra, mingw-w64, ffmpeg (flake.nix)
+mise run setup         # .venv with capstone
+mise run extract       # carve code + overlay dump from your own disc (sega-cd-eng/)
+mise run build         # translated native build -> engine/build/snatcher
+mise run package:mac   # dist/Snatcher.app
+mise run package:windows
+mise run run           # mouse = Konami Justifier (left trigger, right start); start without --justifier for pad only
+```
+
+Without Nix, the same tools via Homebrew work (`brew install cmake sdl3 mingw-w64`); on macOS use Apple clang
+(`CC=/usr/bin/clang CXX=/usr/bin/clang++`), not a Nix-profile gcc.
