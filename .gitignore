@@ -23,3 +23,6 @@ ghidra/*.lock*
 engine/build*/
 dist/
 engine/tests/lift_cases.inc
+
+# MAME / emulator screenshots of the game (copyrighted captures, never commit)
+snap/
