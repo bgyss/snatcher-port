@@ -14,6 +14,7 @@ build:
 
 ## Docs
 
+- [`docs/PLAYING.md`](docs/PLAYING.md): **how to build, run and share the playable Mac build** (controls, options, saves)
 - [`docs/STRATEGY.md`](docs/STRATEGY.md): approach, phases, legal guardrails
 - [`docs/DISC_LAYOUT.md`](docs/DISC_LAYOUT.md): measured disc and format findings
 - [`docs/SKILLS_AND_TOOLS.md`](docs/SKILLS_AND_TOOLS.md): agent skills, tools, prior art
@@ -52,7 +53,8 @@ nix develop            # compilers, SDL3, Ghidra, mingw-w64, ffmpeg (flake.nix)
 mise run setup         # .venv with capstone
 mise run extract       # carve code + overlay dump from your own disc (sega-cd-eng/)
 mise run build         # translated native build -> engine/build/snatcher
-mise run package:mac   # dist/Snatcher.app
+mise run package:mac   # dist/Snatcher.app (personal: contains code translated from your disc, never share)
+mise run package:mac-share  # dist/share/Snatcher-mac.zip (interpreter-only, shareable with players who own the game)
 mise run package:windows
 mise run run           # mouse = Konami Justifier (left trigger, right start); start without --justifier for pad only
 ```

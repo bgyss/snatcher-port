@@ -1,4 +1,4 @@
-// CD image access: .cue plus a single raw MODE1/2352 + audio .bin (redump layout).
+// CD image access: .cue plus raw MODE1/2352 + audio .bin files (redump layout: one joined .bin or one per track).
 #pragma once
 #include <cstdint>
 #include <cstdio>
@@ -14,7 +14,7 @@ constexpr int kUserData = 2048;
 struct Track {
     int number = 0;
     bool audio = false;
-    uint32_t start_lba = 0;   // INDEX 01, in sectors from the start of the bin (no 150 pregap)
+    uint32_t start_lba = 0;   // INDEX 01, in sectors from the start of the first bin (no 150 pregap)
     uint32_t end_lba = 0;     // exclusive
 };
 
@@ -34,7 +34,11 @@ public:
 
 private:
     Disc() = default;
-    std::FILE* file_ = nullptr;
+    struct File {
+        std::FILE* fp;
+        uint32_t start, sectors;   // position of this .bin in the joined image
+    };
+    std::vector<File> files_;
     std::vector<Track> tracks_;
     uint32_t total_sectors_ = 0;
 };

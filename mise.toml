@@ -43,6 +43,10 @@ run = [
 description = "Build dist/Snatcher.app"
 run = "tools/package/mac_app.sh"
 
+[tasks."package:mac-share"]
+description = "Build dist/share/Snatcher-mac.zip: interpreter-only universal app (macOS 12+) for playtesters (docs/PLAYING.md)"
+run = "tools/package/mac_app.sh --shareable"
+
 [tasks."package:windows"]
 description = "Cross-build dist/windows/snatcher.exe (needs mingw-w64 from the Nix shell)"
 run = "tools/package/windows_cross.sh"
