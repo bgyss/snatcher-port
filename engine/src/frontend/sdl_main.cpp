@@ -3,7 +3,9 @@
 //   --justifier: mouse is the Konami Justifier on port 2 (left = trigger, right = start)
 #include <SDL3/SDL.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -127,16 +129,31 @@ int main(int argc, char** argv) {
                 bool inside = mx >= 0 && my >= 0 && gx < sys.width() && gy < sys.height();
                 sys.set_gun(gx, gy, inside, uint8_t(((mb & SDL_BUTTON_LMASK) ? 1 : 0) | ((mb & SDL_BUTTON_RMASK) ? 2 : 0)));
             }
-            // Audio-paced: keep roughly 3 frames of audio queued.
-            const int target_bytes = kSampleRate / 20 * 4;
-            if (!audio || SDL_GetAudioStreamQueued(audio) < target_bytes) {
+            // Fixed-timestep pacing on the monotonic clock (NTSC: 59.9227 Hz), independent of the display refresh
+            // (ProMotion/120 Hz would otherwise make an audio-queue-driven loop run frames unevenly). The frame period is
+            // nudged by up to 0.5% from the audio queue fill so audio and video never drift apart.
+            static uint64_t next_ns = SDL_GetTicksNS();
+            const double base_ns = 1e9 / 59.9227;
+            double fill = audio ? double(SDL_GetAudioStreamQueued(audio)) / double(kSampleRate / 20 * 4) : 1.0;  // 1.0 = 3 frames queued
+            double period = base_ns * (1.0 + std::max(-0.005, std::min(0.005, (fill - 1.0) * 0.01)));
+            uint64_t now = SDL_GetTicksNS();
+            if (now > next_ns + uint64_t(5 * base_ns)) next_ns = now;     // fell far behind (window drag, breakpoint): resync, don't fast-forward
+            int ran = 0;
+            while (next_ns <= now && ran < 3) {
                 sys.run_frame();
-                if (audio && !sys.audio().empty())
+                if (audio && !sys.audio().empty() && SDL_GetAudioStreamQueued(audio) < kSampleRate / 5 * 4)
                     SDL_PutAudioStreamData(audio, sys.audio().data(), int(sys.audio().size() * sizeof(int16_t)));
                 sys.audio().clear();
                 if (sys.halted()) running_game = false;
+                next_ns += uint64_t(period);
+                ++ran;
             }
-            SDL_UpdateTexture(tex, nullptr, sys.framebuffer(), 320 * 4);
+            if (ran) SDL_UpdateTexture(tex, nullptr, sys.framebuffer(), 320 * 4);
+            if (std::getenv("SNATCHER_FPS")) {
+                static uint64_t t0 = now; static int frames = 0;
+                frames += ran;
+                if (now - t0 >= 1000000000ull) { std::fprintf(stderr, "emu fps %.2f, audio queued %d bytes\n", frames * 1e9 / double(now - t0), audio ? SDL_GetAudioStreamQueued(audio) : 0); t0 = now; frames = 0; }
+            }
         }
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
