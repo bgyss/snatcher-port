@@ -105,7 +105,8 @@ void Vdp::write_word(uint16_t v) {
 }
 
 void Vdp::write_data(uint16_t v) {
-    if (std::getenv("SCD_VDPPORT")) std::fprintf(stderr, "D %04x pc=%06x\n", v, current_pc_for_debug());
+    static const bool port_log = std::getenv("SCD_VDPPORT") != nullptr;
+    if (port_log) std::fprintf(stderr, "D %04x pc=%06x\n", v, current_pc_for_debug());
     cmd_pending_ = false;
     if (dma_fill_pending_) {
         dma_fill_pending_ = false;
@@ -116,7 +117,8 @@ void Vdp::write_data(uint16_t v) {
 }
 
 void Vdp::write_ctrl(uint16_t v) {
-    if (std::getenv("SCD_VDPPORT")) std::fprintf(stderr, "C %04x pc=%06x\n", v, current_pc_for_debug());
+    static const bool port_log = std::getenv("SCD_VDPPORT") != nullptr;
+    if (port_log) std::fprintf(stderr, "C %04x pc=%06x\n", v, current_pc_for_debug());
     if (cmd_pending_) {
         cmd_pending_ = false;
         code_ = uint8_t((code_ & 0x03) | ((v >> 2) & 0x3C));
@@ -153,7 +155,8 @@ void Vdp::do_dma() {
         dma_copy();
         return;
     }
-    if (std::getenv("SCD_VDPLOG"))
+    static const bool dma_log = std::getenv("SCD_VDPLOG") != nullptr;
+    if (dma_log)
         std::fprintf(stderr, "[vdp dma] line %d code=%02x addr=%04x src=%06x len=%u\n", cur_line_, code_, addr_, src << 1, len);
     uint32_t a = src << 1;
     // Sega CD: a DMA that reads Word RAM is one word late: the first word written is stale and the last
@@ -394,7 +397,8 @@ done:;
 }
 
 void Vdp::render_line(int line) {
-    if (std::getenv("SCD_LINELOG") && line % 56 == 0)
+    static const bool line_log = std::getenv("SCD_LINELOG") != nullptr;
+    if (line_log && line % 56 == 0)
         std::fprintf(stderr, "[line %d] r0=%02x r1=%02x r11=%02x r12=%02x vs=%03x %03x %03x %03x %03x %03x\n", line, reg_[0], reg_[1], reg_[11], reg_[12], vsram_[0], vsram_[1], vsram_[2], vsram_[3], vsram_[4], vsram_[5]);
     const int w = width();
     uint32_t* dst = fb_ + line * 320;

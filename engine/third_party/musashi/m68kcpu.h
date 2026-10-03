@@ -1931,7 +1931,14 @@ static inline void m68ki_exception_privilege_violation(void)
 
 extern jmp_buf m68ki_bus_error_jmp_buf;
 
+/* setjmp() on macOS/BSD also saves the signal mask (two syscalls per m68k_execute call); _setjmp() does not */
+#if defined(__APPLE__) || defined(__unix__)
+#define m68ki_check_bus_error_trap() _setjmp(m68ki_bus_error_jmp_buf)
+#define m68ki_bus_error_longjmp(buf, v) _longjmp(buf, v)
+#else
 #define m68ki_check_bus_error_trap() setjmp(m68ki_bus_error_jmp_buf)
+#define m68ki_bus_error_longjmp(buf, v) longjmp(buf, v)
+#endif
 
 /* Exception for bus error */
 static inline void m68ki_exception_bus_error(void)
@@ -1966,7 +1973,7 @@ static inline void m68ki_exception_bus_error(void)
 
 	CPU_RUN_MODE = RUN_MODE_BERR_AERR_RESET;
 
-	longjmp(m68ki_bus_error_jmp_buf, 1);
+	m68ki_bus_error_longjmp(m68ki_bus_error_jmp_buf, 1);
 }
 
 extern int cpu_log_enabled;

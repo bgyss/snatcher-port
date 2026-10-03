@@ -1,13 +1,17 @@
 // Headless runner: boots a disc for N frames, optionally dumping frames and audio.
-//   scd_headless <disc.cue> [--frames N] [--ppm-every N --out DIR] [--wav out.wav]
+//   scd_headless <disc.cue> [--frames N] [--ppm-every N --out DIR] [--wav out.wav] [--video out.mp4]
 //                [--press FRAME:BUTTONS:HOLD ...]
+// --video writes a 1440x1080 AAC demo video of the run, H.264 or with --video-codec h265 H.265 (needs ffmpeg, see recorder.h).
 // BUTTONS is a string of U D L R B C A S. Output stays in the directory given by --out.
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
+#include "recorder.h"
 #include "system.h"
 
 using namespace scd;
@@ -58,10 +62,10 @@ uint16_t parse_buttons(const std::string& s) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s disc.cue [--frames N] [--ppm-every N] [--out DIR] [--wav FILE] [--press F:BTNS:HOLD]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s disc.cue [--frames N] [--ppm-every N] [--out DIR] [--wav FILE] [--video FILE.mp4 [--video-codec h264|h265]] [--press F:BTNS:HOLD]\n", argv[0]);
         return 2;
     }
-    std::string cue = argv[1], out = ".", wav;
+    std::string cue = argv[1], out = ".", wav, video, codec = "h264";
     int frames = 600, ppm_every = 0;
     std::vector<Press> presses;
     for (int i = 2; i < argc; ++i) {
@@ -70,6 +74,8 @@ int main(int argc, char** argv) {
         else if (a == "--ppm-every" && i + 1 < argc) ppm_every = std::atoi(argv[++i]);
         else if (a == "--out" && i + 1 < argc) out = argv[++i];
         else if (a == "--wav" && i + 1 < argc) wav = argv[++i];
+        else if (a == "--video" && i + 1 < argc) video = argv[++i];
+        else if (a == "--video-codec" && i + 1 < argc) codec = argv[++i];
         else if (a == "--press" && i + 1 < argc) {
             int f, h;
             char b[16];
@@ -91,12 +97,19 @@ int main(int argc, char** argv) {
     if (std::getenv("SCD_BRAM_SELFTEST")) { bool ok = sys.bram_selftest(); sys.shutdown(); std::printf("backup RAM selftest: %s\n", ok ? "PASS" : "FAIL"); return ok ? 0 : 1; }
     if (const char* g = std::getenv("SCD_GUN")) { int gx, gy; if (std::sscanf(g, "%d,%d", &gx, &gy) == 2) { sys.set_gun_connected(true); sys.set_gun(gx, gy, true, 0); } }
     std::vector<int16_t> all_audio;
+    Recorder rec;
+    if (!video.empty() && !rec.start(video, sys.height(), codec, &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    const bool frametime = std::getenv("SCD_FRAMETIME") != nullptr;   // per-frame host cost report (stutter hunting)
+    std::vector<std::pair<double, int>> ft;
     for (int f = 0; f < frames && !sys.halted(); ++f) {
         uint16_t pad = 0;
         for (auto& p : presses) if (f >= p.frame && f < p.frame + p.hold) pad |= p.buttons;
         if (profile_from >= 0 && f == frames - profile_from) sys.enable_profile(true);
         sys.set_pad(0, pad);
+        auto t0 = std::chrono::steady_clock::now();
         sys.run_frame();
+        if (frametime) ft.push_back({std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), f + 1});
+        rec.frame(sys.framebuffer(), sys.width(), sys.height(), sys.audio());
         if (!wav.empty()) {
             all_audio.insert(all_audio.end(), sys.audio().begin(), sys.audio().end());
         }
@@ -141,6 +154,16 @@ int main(int argc, char** argv) {
             write_ppm(out + name, sys.framebuffer(), sys.width(), sys.height());
         }
     }
+    if (frametime && !ft.empty()) {
+        double sum = 0; int over = 0;
+        for (auto& [ms, fr] : ft) { sum += ms; over += ms > 1000.0 / 59.9227; }
+        std::vector<std::pair<double, int>> s = ft;
+        std::sort(s.begin(), s.end());
+        auto pct = [&](double p) { return s[std::min(s.size() - 1, size_t(p * s.size()))].first; };
+        std::fprintf(stderr, "frame ms: mean %.3f p50 %.3f p99 %.3f p99.9 %.3f max %.3f, %d/%zu over 16.69ms\nworst:", sum / ft.size(), pct(0.5), pct(0.99), pct(0.999), s.back().first, over, ft.size());
+        for (size_t i = 0; i < std::min<size_t>(10, s.size()); ++i) std::fprintf(stderr, " f%d=%.2f", s[s.size() - 1 - i].second, s[s.size() - 1 - i].first);
+        std::fprintf(stderr, "\n");
+    }
     if (std::getenv("SCD_DEBUG")) { sys.dump_state(); std::fprintf(stderr, "YM writes: %llu translated=%d fallback_steps=%llu verified=%llu\n", (unsigned long long)sys.ym_write_count(), int(sys.translated()), (unsigned long long)sys.fallback_steps(), (unsigned long long)sys.verified_count()); }
     if (profile_from >= 0) sys.dump_profile(12);
     if (std::getenv("SCD_OVERLAYS")) sys.dump_overlay_hist();
@@ -160,6 +183,10 @@ int main(int argc, char** argv) {
     }
     write_ppm(out + "/final.ppm", sys.framebuffer(), sys.width(), sys.height());
     if (!wav.empty()) write_wav(wav, all_audio);
+    if (rec.active()) {
+        std::fprintf(stderr, "encoding %s (%llu frames)...\n", video.c_str(), (unsigned long long)rec.frames());
+        if (!rec.finish(&err)) std::fprintf(stderr, "error: %s\n", err.c_str());
+    }
     std::printf("ran %llu frames%s\n", (unsigned long long)sys.frame_count(), sys.halted() ? " (halted)" : "");
     sys.shutdown();
     return 0;

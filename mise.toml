@@ -50,3 +50,11 @@ run = "tools/package/windows_cross.sh"
 [tasks.run]
 description = "Run the game with the mouse as a Justifier on port 2"
 run = "engine/build/snatcher \"$SCD_CUE\" --justifier"
+
+[tasks.record]
+description = "Play and record a demo video from boot (F9 stops; 1440x1080 H.264, VIDEO_CODEC=h265 for H.265)"
+run = "engine/build/snatcher \"$SCD_CUE\" --record \"${VIDEO_OUT:-work/demo/snatcher-demo.mp4}\" --video-codec \"${VIDEO_CODEC:-h264}\""
+
+[tasks."check:macos-present"]
+description = "Re-check the macOS Metal present stalls (docs/MACOS_NOTES.md)"
+run = "tools/macos/check_present.sh"

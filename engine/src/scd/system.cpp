@@ -576,10 +576,10 @@ void System::run_cpu(Cpu c, int cycles) {
     refresh_irq(c);
     int used;
 #ifdef SNATCHER_TRANSLATED
-    used = (c == kSub && translate_) ? run_sub_translated(budget) : m68k_execute(budget);
 #ifdef SNATCHER_TRANSLATED_MAIN
-    if (c == kMain && translate_) used = run_main_translated(budget); else if (c == kMain) used = m68k_execute(budget);
+    if (c == kMain && translate_) used = run_main_translated(budget); else
 #endif
+    used = (c == kSub && translate_) ? run_sub_translated(budget) : m68k_execute(budget);
 #else
     used = m68k_execute(budget);
 #endif

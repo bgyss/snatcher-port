@@ -1,15 +1,22 @@
 // SDL3 front-end: window, audio, keyboard and gamepad input for the Sega CD core.
-//   snatcher <disc.cue> [--justifier]   (or drop a .cue file onto the window)
+//   snatcher <disc.cue> [--justifier] [--record FILE.mp4] [--video-codec h264|h265]   (or drop a .cue file onto the window)
 //   --justifier: mouse is the Konami Justifier on port 2 (left = trigger, right = start)
+//   --record: record a demo video from boot; F9 starts/stops a recording at any time (default ~/Movies/snatcher-<time>.mp4).
+//   Videos are 1440x1080 with AAC audio, H.264 unless --video-codec h265; the final encode runs in the background.
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
+#include "recorder.h"
 #include "system.h"
 
 using namespace scd;
@@ -70,6 +77,11 @@ bool boot(const std::string& cue, bool* running_game) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef __APPLE__
+    // SDL's Metal-backed renderers (metal, gpu) intermittently stall presents for up to the 1 s drawable timeout on
+    // macOS (seen with SDL 3.4.10 on a 120 Hz panel); the OpenGL renderer presents every vsync. SDL_RENDER_DRIVER overrides.
+    SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl,metal");
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
@@ -81,6 +93,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     SDL_SetRenderVSync(renderer, 1);
+    if (std::getenv("SNATCHER_FPS")) std::fprintf(stderr, "renderer %s\n", SDL_GetRendererName(renderer));
     SDL_SetRenderLogicalPresentation(renderer, 320, 240, SDL_LOGICAL_PRESENTATION_LETTERBOX);
     SDL_Texture* tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, 320, 240);
     SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_NEAREST);
@@ -98,11 +111,76 @@ int main(int argc, char** argv) {
 
     bool running_game = false;
     bool gun = false;
-    std::string disc;
-    for (int i = 1; i < argc; ++i) { if (std::string(argv[i]) == "--justifier") gun = true; else disc = argv[i]; }
+    std::string disc, record_path, codec = "h264";
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--justifier") gun = true;
+        else if (a == "--record" && i + 1 < argc) record_path = argv[++i];
+        else if (a == "--video-codec" && i + 1 < argc) codec = argv[++i];
+        else disc = a;
+    }
     if (!disc.empty()) boot(disc, &running_game);
     System::instance().set_gun_connected(gun);   // the controller ID is read at boot: start with --justifier to get the Gun Adjust option
     SDL_SetWindowTitle(window, running_game ? "Snatcher" : "Snatcher - drop a .cue file on this window");
+
+    // Demo recording (F9). Finishing a recording encodes the final video on a worker thread so play continues.
+    std::unique_ptr<Recorder> rec;
+    std::vector<std::thread> encoders;
+    auto start_recording = [&](std::string path) {
+        if (path.empty()) {
+            const char* dir = SDL_GetUserFolder(SDL_FOLDER_VIDEOS);
+            char stamp[32];
+            std::time_t t = std::time(nullptr);
+            std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&t));
+            path = std::string(dir ? dir : "") + "snatcher-" + stamp + ".mp4";
+        }
+        auto r = std::make_unique<Recorder>();
+        std::string err;
+        if (!r->start(path, System::instance().height(), codec, &err)) { std::fprintf(stderr, "recording: %s\n", err.c_str()); return; }
+        std::fprintf(stderr, "recording to %s (F9 to stop)\n", path.c_str());
+        rec = std::move(r);
+        SDL_SetWindowTitle(window, "Snatcher - REC (F9 to stop)");
+    };
+    auto stop_recording = [&] {
+        if (!rec) return;
+        std::fprintf(stderr, "encoding %s (%llu frames)...\n", rec->path().c_str(), (unsigned long long)rec->frames());
+        encoders.emplace_back([r = std::move(rec)] {
+            std::string err;
+            if (r->finish(&err)) std::fprintf(stderr, "saved %s\n", r->path().c_str());
+            else std::fprintf(stderr, "recording: %s\n", err.c_str());
+        });
+        SDL_SetWindowTitle(window, "Snatcher");
+    };
+    if (running_game && !record_path.empty()) start_recording(record_path);
+
+    // Frame pacing. When the display refresh is within 1% of n x 59.9227 Hz (60 Hz, 120 Hz ProMotion) the emulator is
+    // locked to vsync and runs exactly one frame every n vsyncs: a wall-clock deadline at 59.92 Hz would drift across
+    // vsync edges and show frames for 1 or 3 refreshes instead of 2. Elapsed vsyncs are counted on a grid that slowly
+    // phase-locks to the present times, so present jitter under half a vsync (it is several ms, alternating) never moves
+    // a frame boundary. Other refresh rates (75, 144 Hz, unknown) and a hidden window pace on the monotonic clock.
+    // Audio drift (the emulator runs 0.13% fast on a 60 Hz lock, and the audio device has its own clock) is absorbed by
+    // resampling the stream from the queue fill rather than by retiming video.
+    constexpr double kEmuHz = 59.9227;
+    const int audio_target = kSampleRate / 20 * 4;   // bytes: 50 ms (3 frames) of 16-bit stereo
+    const bool show_fps = std::getenv("SNATCHER_FPS") != nullptr;
+    double vsync_ns = 0, period_ns = 1e9 / kEmuHz, acc_ns = 0, audio_fill = 1.0, grid_ns = 0;
+    bool locked = false;
+    int64_t grid_k = 0;
+    auto retime = [&] {
+        const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
+        double hz = m ? m->refresh_rate : 0.0;
+        int n = hz > 0 ? int(std::lround(hz / kEmuHz)) : 0;
+        locked = n >= 1 && std::fabs(hz / n / kEmuHz - 1.0) < 0.01;
+        vsync_ns = hz > 0 ? 1e9 / hz : 0;
+        period_ns = locked ? vsync_ns * n : 1e9 / kEmuHz;
+        grid_ns = double(SDL_GetTicksNS());
+        grid_k = 0;
+        acc_ns = locked ? vsync_ns / 2 : 0;   // locked: acc moves in whole vsyncs, so half a vsync keeps it off the boundary
+        if (show_fps) std::fprintf(stderr, "display %.2f Hz: %s, frame period %.3f ms\n", hz, locked ? "vsync-locked" : "clock-paced", period_ns / 1e6);
+    };
+    retime();
+    uint64_t prev_ns = SDL_GetTicksNS();
+    bool visible = true;
 
     bool quit = false;
     while (!quit) {
@@ -110,14 +188,39 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) quit = true;
             else if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) {
+                stop_recording();
                 if (running_game) System::instance().shutdown();
                 running_game = false;
                 if (boot(e.drop.data, &running_game)) SDL_SetWindowTitle(window, "Snatcher");
             } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F11) {
                 bool fs = SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN;
                 SDL_SetWindowFullscreen(window, !fs);
+            } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F9 && !e.key.repeat && running_game) {
+                if (rec) stop_recording(); else start_recording("");
             } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) quit = true;
+            else if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED || e.type == SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED) retime();
+            // A hidden window's presents can block for 100+ ms (macOS throttles occluded Metal layers): stop presenting
+            // and pace on the clock so audio keeps playing.
+            else if (e.type == SDL_EVENT_WINDOW_OCCLUDED || e.type == SDL_EVENT_WINDOW_HIDDEN || e.type == SDL_EVENT_WINDOW_MINIMIZED) visible = false;
+            else if (e.type == SDL_EVENT_WINDOW_EXPOSED || e.type == SDL_EVENT_WINDOW_SHOWN || e.type == SDL_EVENT_WINDOW_RESTORED) visible = true;
         }
+        uint64_t now = SDL_GetTicksNS();
+        int64_t vsyncs = 1;   // elapsed since the last iteration (for SNATCHER_FPS)
+        if (locked && visible) {
+            double t = double(now) - grid_ns;
+            int64_t k = std::llround(t / vsync_ns);
+            grid_ns += 0.02 * (t - double(k) * vsync_ns);   // follow the real vsync phase and rate
+            acc_ns += double(k - grid_k) * vsync_ns;
+            vsyncs = k - grid_k;
+            grid_k = k;
+        } else {
+            acc_ns += double(now - prev_ns);
+            grid_ns = double(now);
+            grid_k = 0;
+        }
+        prev_ns = now;
+        if (acc_ns > 8 * period_ns) acc_ns = period_ns + (locked ? vsync_ns / 2 : 0);   // fell far behind (window drag, breakpoint): resync, don't fast-forward
+        int ran = 0;
         if (running_game) {
             System& sys = System::instance();
             sys.set_pad(0, keyboard_buttons() | gamepad_buttons(pad));
@@ -129,31 +232,38 @@ int main(int argc, char** argv) {
                 bool inside = mx >= 0 && my >= 0 && gx < sys.width() && gy < sys.height();
                 sys.set_gun(gx, gy, inside, uint8_t(((mb & SDL_BUTTON_LMASK) ? 1 : 0) | ((mb & SDL_BUTTON_RMASK) ? 2 : 0)));
             }
-            // Fixed-timestep pacing on the monotonic clock (NTSC: 59.9227 Hz), independent of the display refresh
-            // (ProMotion/120 Hz would otherwise make an audio-queue-driven loop run frames unevenly). The frame period is
-            // nudged by up to 0.5% from the audio queue fill so audio and video never drift apart.
-            static uint64_t next_ns = SDL_GetTicksNS();
-            const double base_ns = 1e9 / 59.9227;
-            double fill = audio ? double(SDL_GetAudioStreamQueued(audio)) / double(kSampleRate / 20 * 4) : 1.0;  // 1.0 = 3 frames queued
-            double period = base_ns * (1.0 + std::max(-0.005, std::min(0.005, (fill - 1.0) * 0.01)));
-            uint64_t now = SDL_GetTicksNS();
-            if (now > next_ns + uint64_t(5 * base_ns)) next_ns = now;     // fell far behind (window drag, breakpoint): resync, don't fast-forward
-            int ran = 0;
-            while (next_ns <= now && ran < 3) {
+            while (acc_ns >= period_ns && running_game) {
                 sys.run_frame();
-                if (audio && !sys.audio().empty() && SDL_GetAudioStreamQueued(audio) < kSampleRate / 5 * 4)
-                    SDL_PutAudioStreamData(audio, sys.audio().data(), int(sys.audio().size() * sizeof(int16_t)));
+                if (rec) rec->frame(sys.framebuffer(), sys.width(), sys.height(), sys.audio());
+                if (audio && !sys.audio().empty()) {
+                    int queued = SDL_GetAudioStreamQueued(audio);
+                    audio_fill += 0.05 * (double(queued) / audio_target - audio_fill);
+                    SDL_SetAudioStreamFrequencyRatio(audio, float(1.0 + std::clamp((audio_fill - 1.0) * 0.01, -0.01, 0.01)));
+                    if (queued < audio_target * 4)   // after a long stall, drop rather than add latency
+                        SDL_PutAudioStreamData(audio, sys.audio().data(), int(sys.audio().size() * sizeof(int16_t)));
+                }
                 sys.audio().clear();
                 if (sys.halted()) running_game = false;
-                next_ns += uint64_t(period);
+                acc_ns -= period_ns;
                 ++ran;
             }
             if (ran) SDL_UpdateTexture(tex, nullptr, sys.framebuffer(), 320 * 4);
-            if (std::getenv("SNATCHER_FPS")) {
-                static uint64_t t0 = now; static int frames = 0;
-                frames += ran;
-                if (now - t0 >= 1000000000ull) { std::fprintf(stderr, "emu fps %.2f, audio queued %d bytes\n", frames * 1e9 / double(now - t0), audio ? SDL_GetAudioStreamQueued(audio) : 0); t0 = now; frames = 0; }
+        }
+        if (show_fps && running_game) {
+            // hold[k]: emulated frames that stayed on screen for k vsyncs (presents when not vsync-locked); steady = one bucket
+            static uint64_t t0 = now; static int frames = 0, held = 0, hold[5] = {};
+            frames += ran;
+            held += int(vsyncs);
+            if (ran) { hold[std::min(held, 4)]++; held = 0; }
+            if (now - t0 >= 1000000000ull) {
+                std::fprintf(stderr, "emu fps %.2f, audio queued %d bytes (ratio %.4f), vsyncs per frame 1:%d 2:%d 3:%d 4+:%d%s\n", frames * 1e9 / double(now - t0),
+                             audio ? SDL_GetAudioStreamQueued(audio) : 0, audio ? SDL_GetAudioStreamFrequencyRatio(audio) : 1.0f, hold[1], hold[2], hold[3], hold[4], visible ? "" : " (hidden)");
+                t0 = now; frames = 0; std::fill(hold, hold + 5, 0);
             }
+        }
+        if (!visible) {
+            if (acc_ns < period_ns) SDL_DelayPrecise(uint64_t(period_ns - acc_ns));
+            continue;
         }
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
@@ -164,6 +274,9 @@ int main(int argc, char** argv) {
         }
         SDL_RenderPresent(renderer);
     }
+    stop_recording();
+    if (!encoders.empty()) std::fprintf(stderr, "finishing video encode...\n");
+    for (auto& t : encoders) t.join();
     if (running_game) System::instance().shutdown();
     SDL_Quit();
     return 0;
