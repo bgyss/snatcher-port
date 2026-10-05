@@ -18,9 +18,9 @@
             pkgs.sdl3          # native front-end (the Windows build fetches and links SDL3 statically)
             pkgs.ffmpeg        # PCM / CD-DA conversion for oracle work
             pkgs.ghidra        # Phase 0 disassembly project (tools/ghidra/setup_project.sh)
+            pkgs.mame          # oracle emulator (tools/emu/*.lua), the ground truth for BIOS/hardware behaviour
             pkgs.git
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ mingw ]
-            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ mingw pkgs.mame ];
+          ] ++ [ mingw ];
           shellHook = ''
             # Use the stdenv compiler from this shell, never a stray ~/.nix-profile gcc (it cannot link against the macOS SDK).
             export CC=$(command -v ${if pkgs.stdenv.isDarwin then "clang" else "gcc"})

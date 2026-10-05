@@ -111,13 +111,34 @@ int main(int argc, char** argv) {
 
     bool running_game = false;
     bool gun = false;
+    bool want_log = std::getenv("SNATCHER_LOG") != nullptr;
+    double cd_speed = std::getenv("SCD_CD_SPEED") ? std::atof(std::getenv("SCD_CD_SPEED")) : 1.0;
     std::string disc, record_path, codec = "h264";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--justifier") gun = true;
+        else if (a == "--log") want_log = true;
+        else if (a == "--cd-speed" && i + 1 < argc) cd_speed = std::atof(argv[++i]);
         else if (a == "--record" && i + 1 < argc) record_path = argv[++i];
         else if (a == "--video-codec" && i + 1 < argc) codec = argv[++i];
         else disc = a;
+    }
+    System::instance().set_cd_speed(cd_speed);
+    if (want_log) {
+        char* pref = SDL_GetPrefPath("snatcher-port", "snatcher");
+        std::string path = std::string(pref ? pref : "") + "debug.log";
+        SDL_free(pref);
+        if (System::instance().open_log(path)) {
+            const int v = SDL_GetVersion();
+            scd::debug_log("platform %s, SDL %d.%d.%d, renderer %s\n", SDL_GetPlatform(), SDL_VERSIONNUM_MAJOR(v), SDL_VERSIONNUM_MINOR(v),
+                           SDL_VERSIONNUM_MICRO(v), SDL_GetRendererName(renderer));
+            const char* adev = SDL_GetAudioDeviceName(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK);
+            scd::debug_log("audio: %s (%s); gamepad: %s; CD speed %.1fx; justifier %s\n", adev ? adev : "?", audio ? "stream ok" : "STREAM FAILED, no sound",
+                           pad ? SDL_GetGamepadName(pad) : "none", cd_speed, gun ? "on" : "off");
+            scd::debug_log("log file: %s\ndisc: %s\n", path.c_str(), disc.empty() ? "(none yet, drop a .cue on the window)" : disc.c_str());
+        } else {
+            std::fprintf(stderr, "could not open debug log %s\n", path.c_str());
+        }
     }
     if (!disc.empty()) boot(disc, &running_game);
     System::instance().set_gun_connected(gun);   // the controller ID is read at boot: start with --justifier to get the Gun Adjust option
@@ -195,6 +216,9 @@ int main(int argc, char** argv) {
             } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F11) {
                 bool fs = SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN;
                 SDL_SetWindowFullscreen(window, !fs);
+            } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F10 && !e.key.repeat && running_game) {
+                scd::debug_log("[user] F10 state snapshot at frame %llu\n", (unsigned long long)System::instance().frame_count());
+                System::instance().dump_state();
             } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F9 && !e.key.repeat && running_game) {
                 if (rec) stop_recording(); else start_recording("");
             } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) quit = true;
@@ -278,6 +302,7 @@ int main(int argc, char** argv) {
     if (!encoders.empty()) std::fprintf(stderr, "finishing video encode...\n");
     for (auto& t : encoders) t.join();
     if (running_game) System::instance().shutdown();
+    System::instance().close_log();
     SDL_Quit();
     return 0;
 }

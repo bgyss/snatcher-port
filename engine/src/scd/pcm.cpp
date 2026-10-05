@@ -1,6 +1,7 @@
 #include "pcm.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace scd {
@@ -20,8 +21,12 @@ uint8_t Pcm::read(uint32_t a) {
     a &= 0x3FFF;
     if (a & 0x2000) return ram_[((a >> 1) & 0xFFF) | (bank_ << 12)];
     int reg = (a >> 1) & 0x1F;
-    if (reg >= 0x10 && reg < 0x18) return uint8_t(ch_[reg & 7].addr >> 19);   // current address high byte
-    if (reg >= 0x18 && reg < 0x20) return uint8_t(ch_[reg & 7].addr >> 11);   // low byte
+    // Address counters at $FF0020-$FF003F: per channel 4 bytes apart, low byte at +1 (offset 0x21 + 4n),
+    // high byte at +3. Snatcher's stream driver ($15A00) reads exactly these to detect the end of a voice stream.
+    if (reg >= 0x10 && reg < 0x20) {
+        const Channel& c = ch_[(reg >> 1) & 7];
+        return uint8_t((reg & 1) ? c.addr >> 19 : c.addr >> 11);
+    }
     return 0xFF;
 }
 
@@ -57,6 +62,19 @@ void Pcm::write(uint32_t a, uint8_t v) {
         }
         default: break;
     }
+}
+
+std::string Pcm::describe() const {
+    char line[160];
+    std::string out;
+    std::snprintf(line, sizeof line, "PCM on=%d ctrl=%02x bank=%d sel=%d enable=%02x\n", on_, ctrl_, bank_, sel_, enable_);
+    out += line;
+    for (int i = 0; i < 8; ++i) {
+        std::snprintf(line, sizeof line, "  ch%d %s env=%02x pan=%02x fd=%04x ls=%04x st=%02x addr=%04x.%03x\n", i, (enable_ & (1 << i)) ? "off" : "ON ",
+                      ch_[i].env, ch_[i].pan, ch_[i].fd, ch_[i].ls, ch_[i].st, ch_[i].addr >> 11, ch_[i].addr & 0x7FF);
+        out += line;
+    }
+    return out;
 }
 
 void Pcm::clock(int16_t* left, int16_t* right) {

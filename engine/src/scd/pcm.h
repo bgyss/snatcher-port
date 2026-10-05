@@ -1,6 +1,7 @@
 // Ricoh RF5C164 PCM sound source (Sega CD).
 #pragma once
 #include <cstdint>
+#include <string>
 
 namespace scd {
 
@@ -15,6 +16,7 @@ public:
     // DMA helper: writes one byte at the current wave RAM bank + offset.
     uint8_t* wave_ram() { return ram_; }
     int bank() const { return bank_; }
+    std::string describe() const;   // debug: channel registers, one line per channel
 
 private:
     struct Channel {
