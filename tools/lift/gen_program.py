@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate the translated Sub-CPU program (SP + SUBCODE) as C++ from the user's disc blobs.
-Usage: tools/lift/gen_program.py <outdir> [code dir default extracted/code]
-Writes <outdir>/sub_translated.cpp. Output is disc-derived: never commit or distribute it."""
-import os, sys, zlib, re
+Usage: tools/lift/gen_program.py <outdir> [code dir default extracted/code] [sub|main|mainram|ovl909|ovl:<file under code dir>|ovl_index]
+Writes <outdir>/<program>_translated.cpp. Output is disc-derived: never commit or distribute it."""
+import glob, os, sys, zlib, re
 sys.path.insert(0, os.path.dirname(__file__))
 from m68k_decode import decode, hx
 from emit import flow_code
@@ -11,6 +11,8 @@ PROGRAMS = {
     'ovl909': dict(regions=[('ovl_909.bin', 0x28000)], entries=[], vectors=False, mask=0xFFFFFF, lo_code=0x28000, scan=(0x28000, 0x2C000)),
     'sub': dict(regions=[('scd_sub_sp.bin', 0x6000), ('scd_subcode.bin', 0xD400)],
                 entries=[0x602A, 0x602E, 0x60A8, 0x60BE, 0x629C], vectors=True, mask=0xFFFFFF, lo_code=0x6000),
+    # SP $7300..$75CF, copied by the Main CPU to $FFE100 and run there (BURAM wrapper etc., JOURNAL). Region = (file, base, offset, length).
+    'mainram': dict(regions=[('scd_sub_sp.bin', 0xFFE100, 0x1300, 0x2D0)], entries=[0xFFE100], vectors=False, mask=0xFFFFFF, lo_code=0xFFE100),
     'main': dict(regions=[('scd_main_ip.bin', 0xFF0000)],
                  entries=[0xFF0000, 0xFF0584, 0xFF06C8, 0xFF08E2], vectors=False, mask=0xFFFFFF, lo_code=0xFF0000),
 }
@@ -23,16 +25,53 @@ def static_target(ins):
         if m: return int(m.group(1), 16)
     return None
 
+def read_seeds(codedir, prog, in_code):
+    """Executed PCs from coverage censuses (coverage_report.py --seeds-out): extra entry points. Out-of-range PCs are ignored."""
+    path = os.path.join(codedir, 'seeds', prog + '.txt')
+    if not os.path.exists(path):
+        return set()
+    with open(path) as f:
+        pcs = {int(l, 16) for l in f if l.strip() and not l.startswith('#')}
+    return {pc for pc in pcs if in_code(pc)}
+
+
+def write_overlay_index(outdir, codedir):
+    """overlays_index.cpp: the runtime's table of overlay programs, one per <code dir>/overlays/ovl_*.bin."""
+    names = sorted(os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(codedir, 'overlays', 'ovl_*.bin')))
+    out = ['// GENERATED from the user\'s disc by tools/lift/gen_program.py. Do not commit or distribute.', '#include "cpu68k.h"', 'namespace lift {']
+    for n in names:
+        k = n.capitalize()
+        out.append('bool %s_has(uint32_t pc); Exit %s_run(Cpu& c, uint32_t pc, int32_t& budget);' % (n, n))
+        out.append('extern const Span k%sRanges[]; extern const int k%sRangeCount; extern const uint32_t k%sCrc;' % (k, k, k))
+    out.append('extern const Program kOverlays[] = {')
+    out += ['    {%s_has, %s_run, k%sRanges, &k%sRangeCount, &k%sCrc},' % (n, n, n.capitalize(), n.capitalize(), n.capitalize()) for n in names]
+    if not names:
+        out.append('    {nullptr, nullptr, nullptr, nullptr, nullptr},')
+    out += ['};', 'extern const int kOverlayCount = %d;' % len(names), '}  // namespace lift']
+    os.makedirs(outdir, exist_ok=True)
+    open(os.path.join(outdir, 'overlays_index.cpp'), 'w').write('\n'.join(out) + '\n')
+    print('overlay index: %d overlays' % len(names))
+
+
 def main():
     outdir = sys.argv[1]
     codedir = sys.argv[2] if len(sys.argv) > 2 else 'extracted/code'
     prog = sys.argv[3] if len(sys.argv) > 3 else 'sub'
-    cfg = PROGRAMS[prog]
+    if prog == 'ovl_index':
+        return write_overlay_index(outdir, codedir)
+    if prog.startswith('ovl:'):   # an overlay dump (SCD_DUMP_OVERLAYS); entry points come from its seed file
+        rel = prog[4:]
+        prog = os.path.splitext(os.path.basename(rel))[0]
+        cfg = dict(regions=[(rel, 0x28000)], entries=[], vectors=False, mask=0xFFFFFF, lo_code=0x28000)
+    else:
+        cfg = PROGRAMS[prog]
     REGIONS, EXTRA_ENTRIES = cfg['regions'], cfg['entries']
     mem = {}
     spans = []
-    for f, base in REGIONS:
+    for f, base, *window in REGIONS:
         d = open(os.path.join(codedir, f), 'rb').read()
+        if window:
+            d = d[window[0]:window[0] + window[1]]
         for i, b in enumerate(d): mem[base + i] = b
         spans.append((base, base + len(d), zlib.crc32(d) & 0xFFFFFFFF, f))
     r8 = lambda a: mem.get(a, 0)
@@ -71,6 +110,7 @@ def main():
                 n += 1; p += i.size
                 if i.flow in (('ret',), ('jump_dyn',)) or (isinstance(i.flow, tuple) and i.flow[0] == 'goto'): term = True; break
             if ok and term and n >= 4: entries.add(a)
+    entries |= read_seeds(codedir, prog, in_code)
     insns = {}
     work = sorted(entries)
     tables = 0

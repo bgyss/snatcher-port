@@ -84,5 +84,6 @@ run = [
   "cmake --build engine/build-interp -j --target scd_headless coverage_test",
   "engine/build-interp/coverage_test",
   "python tools/lift/test_coverage_report.py",
+  "python tools/lift/test_gen_program.py",
   "SCD_HEADLESS_INTERP=engine/build-interp/scd_headless python tools/lift/test_coverage.py",
 ]
