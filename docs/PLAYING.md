@@ -40,6 +40,8 @@ Options (any order after the cue):
 | `--justifier` | mouse = Konami Justifier on port 2 (left click = trigger, right = start). Must be given at launch: the game detects the gun at boot |
 | `--record FILE.mp4` | record from boot; `F9` starts/stops a recording any time (saved to `~/Movies/snatcher-<time>.mp4`, needs ffmpeg) |
 | `--video-codec h265` | H.265 instead of H.264 for recordings |
+| `--log` (or `SNATCHER_LOG=1`) | write `~/Library/Application Support/snatcher-port/snatcher/debug.log` (replaced each launch): setup, CD reads, CD-DA, key presses, game-state changes, a heartbeat every 5 s and a "nothing changed for 30 s" snapshot. `F10` adds a state snapshot on demand |
+| `--cd-speed N` (or `SCD_CD_SPEED=N`) | emulated drive speed, default 1 (a real 1x drive: 75 sectors/s, 0.3 s seeks). Loads are short, so this changes little |
 | `SNATCHER_FPS=1` | print renderer, pacing mode and per-second fps / audio / vsync-hold stats |
 | `SDL_RENDER_DRIVER=metal` | override the renderer (default on macOS: OpenGL, see `docs/MACOS_NOTES.md`) |
 
@@ -56,6 +58,7 @@ The first run with a fresh save opens the Options screen; select QUIT to continu
 | Return | Start | Start |
 | F11 | | fullscreen |
 | F9 | | start/stop recording |
+| F10 | | write a state snapshot to the debug log (use with `--log`) |
 | Esc | | quit immediately |
 
 Connect a gamepad before launching (the first one found is used).

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <ctime>
 #include <cstdlib>
 #include <cstring>
 
@@ -55,11 +56,19 @@ enum Trap {
     kTrapSubVector = 200,
 };
 
+FILE* g_log_file = nullptr;
+
 void log(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     std::vfprintf(stderr, fmt, ap);
     va_end(ap);
+    if (g_log_file) {
+        va_start(ap, fmt);
+        std::vfprintf(g_log_file, fmt, ap);
+        va_end(ap);
+        std::fflush(g_log_file);
+    }
 }
 
 uint8_t bcd(unsigned v) { return uint8_t(((v / 10) << 4) | (v % 10)); }
@@ -69,6 +78,19 @@ inline void put32(uint8_t* p, uint32_t v) { put16(p, v >> 16); put16(p + 2, v); 
 inline uint32_t get32(const uint8_t* p) { return uint32_t(p[0]) << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 
 }  // namespace
+
+void debug_log(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    if (g_log_file) {
+        va_start(ap, fmt);
+        std::vfprintf(g_log_file, fmt, ap);
+        va_end(ap);
+        std::fflush(g_log_file);
+    }
+}
 
 // ------------------------------------------------------- Musashi callbacks
 
@@ -110,6 +132,7 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     disc_ = std::move(disc);
     save_path_ = save_path;
     trace_bios_ = std::getenv("SCD_TRACE_BIOS") != nullptr;
+    comm_log_ = std::getenv("SCD_COMMLOG") != nullptr;
     ovl_log_ = std::getenv("SCD_OVERLAYS") != nullptr;
 #ifdef SNATCHER_TRANSLATED
     translate_ = std::getenv("SCD_NO_TRANSLATE") == nullptr;
@@ -609,6 +632,7 @@ void System::run_frame() {
         audio_run(n);
     }
     ++frames_;
+    if (dbg_log_) debug_frame_end();
 }
 
 // ------------------------------------------------------------------ memory
@@ -844,7 +868,10 @@ void System::ga_write(Cpu who, uint32_t off, uint8_t v) {
             case 0x07: hint_vec_ = uint16_t((hint_vec_ & 0xFF00) | v); return;
             case 0x0E: main_flag_ = v; return;
         }
-        if (off >= 0x10 && off < 0x20) cmd_[off - 0x10] = v;
+        if (off >= 0x10 && off < 0x20) {
+            if (comm_log_ && cmd_[off - 0x10] != v) log("[comm] f=%llu Main cmd[%02x] %02x -> %02x pc=%06x\n", (unsigned long long)frames_, off, cmd_[off - 0x10], v, reg_get(M68K_REG_PC) & 0xFFFFFF);
+            cmd_[off - 0x10] = v;
+        }
         return;
     }
     switch (off) {
@@ -874,7 +901,10 @@ void System::ga_write(Cpu who, uint32_t off, uint8_t v) {
             update_sub_irq();
             return;
     }
-    if (off >= 0x20 && off < 0x30) stat_[off - 0x20] = v;
+    if (off >= 0x20 && off < 0x30) {
+        if (comm_log_ && stat_[off - 0x20] != v) log("[comm] f=%llu Sub  stat[%02x] %02x -> %02x pc=%06x\n", (unsigned long long)frames_, off, stat_[off - 0x20], v, reg_get(M68K_REG_PC) & 0xFFFFFF);
+        stat_[off - 0x20] = v;
+    }
 }
 
 // -------------------------------------------------------------------- I/O
@@ -1033,8 +1063,25 @@ void System::cdbios(int fn) {
     const uint32_t a0 = reg_get(M68K_REG_A0), a1 = reg_get(M68K_REG_A1);
     if (trace_bios_) log("CDBIOS %02x a0=%06x a1=%06x d1=%08x\n", fn, a0, a1, reg_get(M68K_REG_D1));
     switch (fn) {
-        case 0x02: cdda_playing_ = false; set_carry(false); break;             // MSCSTOP
-        case 0x03: case 0x04: set_carry(false); break;                         // pause on/off
+        // Checked against the real BIOS (tools/emu/cdbios_cmd_log.lua, Sub BIOS dispatch table at $2FD8): $02 issues the
+        // CDD Stop command, $03 the CDD Pause command, after which CDBSTAT reports $0500 with the time fields frozen.
+        // The game calls $03 to silence the music when a cinematic is skipped and before every overlay load, then polls
+        // CDBSTAT until it is no longer "playing" ($0100). Ignoring it left the drive "playing" to the end of the track.
+        case 0x02:                                                             // MSCSTOP
+            if (dbg_log_ && cdda_playing_) log("[cd] f=%llu CD-DA stop\n", (unsigned long long)frames_);
+            cdda_playing_ = cdda_paused_ = false;
+            set_carry(false);
+            break;
+        case 0x03:                                                             // MSCPAUSEON
+            if (dbg_log_ && cdda_playing_ && !cdda_paused_) log("[cd] f=%llu CD-DA pause\n", (unsigned long long)frames_);
+            if (cdda_playing_) cdda_paused_ = true;
+            set_carry(false);
+            break;
+        case 0x04:                                                             // MSCPAUSEOFF
+            if (dbg_log_ && cdda_paused_) log("[cd] f=%llu CD-DA resume\n", (unsigned long long)frames_);
+            cdda_paused_ = false;
+            set_carry(false);
+            break;
         case 0x08: case 0x09: set_carry(false); break;                         // ROMPAUSEON/OFF
         case 0x10: set_carry(false); break;                                    // DRVINIT
         case 0x11: case 0x12: case 0x13: {                                     // MSCPLAY / PLAY1 / PLAYR
@@ -1042,12 +1089,15 @@ void System::cdbios(int fn) {
             const auto& tr = disc_->tracks();
             if (track >= 1 && track <= int(tr.size()) && tr[track - 1].audio) {
                 cdda_playing_ = true;
+                cdda_paused_ = false;
                 cdda_track_ = track;
                 cdda_lba_ = tr[track - 1].start_lba;
                 cdda_end_ = tr[track - 1].end_lba;
                 cdda_loop_ = fn == 0x13;
                 cdda_pos_ = kRawSector;
+                if (dbg_log_) log("[cd] f=%llu CD-DA play track %d (%s)\n", (unsigned long long)frames_, track, cdda_loop_ ? "loop" : "once");
             } else {
+                if (dbg_log_) log("[cd] f=%llu CD-DA play track %d: not an audio track\n", (unsigned long long)frames_, track);
                 cdda_playing_ = false;
             }
             set_carry(false);
@@ -1060,9 +1110,11 @@ void System::cdbios(int fn) {
             if (trace_bios_) log("  ROMREADN lba=%u count=%u (frame %llu)\n", cdc_lba_, cdc_remaining_, (unsigned long long)frames_);
             {
                 // 1x drive: 75 sectors/s, plus a seek when the read is not a continuation of the last one.
-                const uint64_t per_sector = kSubClock / 75;
-                uint64_t seek = (cdc_lba_ == cdc_last_lba_ + 1) ? 0 : uint64_t(kSubClock) * 3 / 10;
+                const uint64_t per_sector = uint64_t(kSubClock / (75.0 * cd_speed_));
+                uint64_t seek = (cdc_lba_ == cdc_last_lba_ + 1) ? 0 : uint64_t(kSubClock * 0.3 / cd_speed_);
                 cdc_ready_at_ = sub_cycles_ + seek + per_sector;
+                ++cd_reads_;
+                if (dbg_log_) log("[cd] f=%llu read lba=%u count=%u%s\n", (unsigned long long)frames_, cdc_lba_, cdc_remaining_, seek ? " (seek)" : "");
             }
             cdc_reading_ = true;
             cdc_buf_valid_ = false;
@@ -1080,7 +1132,7 @@ void System::cdbios(int fn) {
             if (cdda_playing_) {
                 uint32_t cur = cdda_lba_ ? cdda_lba_ - 1 : 0, abs_t = cur + 150;
                 uint32_t rel = cur - disc_->tracks()[cdda_track_ - 1].start_lba;
-                put16(st + 0, 0x0100);
+                put16(st + 0, cdda_paused_ ? 0x0500 : 0x0100);
                 put32(st + 8, (uint32_t(bcd(abs_t / 75 / 60)) << 24) | (bcd(abs_t / 75 % 60) << 16) | (bcd(abs_t % 75) << 8));
                 put32(st + 12, (uint32_t(bcd(rel / 75 / 60)) << 24) | (bcd(rel / 75 % 60) << 16) | (bcd(rel % 75) << 8));
             }
@@ -1130,7 +1182,7 @@ void System::cdbios(int fn) {
                 cdc_buf_valid_ = false;
                 cdc_last_lba_ = cdc_lba_;
                 ++cdc_lba_;
-                cdc_ready_at_ = sub_cycles_ + kSubClock / 75;
+                cdc_ready_at_ = sub_cycles_ + uint64_t(kSubClock / (75.0 * cd_speed_));
                 if (cdc_remaining_ && --cdc_remaining_ == 0) cdc_reading_ = false;
             }
             cdc_edt_ = cdc_dsr_ = false;
@@ -1372,6 +1424,71 @@ void System::dump_state() {
     log("  ffef02=%02x%02x\n", main_ram_[0xef02], main_ram_[0xef03]);
     log("sub_run=%d owner=%d mode1m=%d main_flag=%02x sub_flag=%02x int_mask=%04x ien2=%d prg_bank=%d\n", sub_run_, word_owner_, mode_1m_,
         main_flag_, sub_flag_, int_mask_, ien2_, prg_bank_);
+    log("CD: reading=%d lba=%u remaining=%u buf_valid=%d cdda=%d track=%d reads=%llu\n", cdc_reading_, cdc_lba_, cdc_remaining_, cdc_buf_valid_, cdda_playing_, cdda_track_, (unsigned long long)cd_reads_);
+    log("%s", pcm_.describe().c_str());
+}
+
+bool System::open_log(const std::string& path) {
+    close_log();
+    g_log_file = std::fopen(path.c_str(), "w");
+    if (!g_log_file) return false;
+    dbg_log_ = true;
+    std::time_t t = std::time(nullptr);
+    char stamp[40];
+    std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+    log("== snatcher-port debug log, %s ==\n", stamp);
+    return true;
+}
+
+void System::close_log() {
+    dbg_log_ = false;
+    if (g_log_file) std::fclose(g_log_file);
+    g_log_file = nullptr;
+}
+
+void System::log_pad(int port, uint16_t b) {
+    char s[24];
+    int n = 0;
+    static const struct { uint16_t bit; char c; } kBtn[] = {{kUp, 'U'}, {kDown, 'D'}, {kLeft, 'L'}, {kRight, 'R'}, {kB, 'B'}, {kC, 'C'}, {kA, 'A'}, {kStart, 'S'}};
+    for (auto& k : kBtn) if (b & k.bit) s[n++] = k.c;
+    s[n] = 0;
+    log("[pad] f=%llu port%d %s\n", (unsigned long long)frames_, port + 1, n ? s : "-");
+}
+
+// Called once per emulated frame while the log is open: game-state changes, a heartbeat every 300 frames (~5 s) and a
+// notice when nothing observable (screen, CD, CD-DA, game state) has changed for 6 heartbeats.
+void System::debug_frame_end() {
+    uint16_t e022 = uint16_t(main_ram_[0xE022] << 8 | main_ram_[0xE023]), e06c = uint16_t(main_ram_[0xE06C] << 8 | main_ram_[0xE06D]);
+    if (e022 != e022_logged_ || e06c != e06c_logged_) {
+        log("[game] f=%llu main state $E022=%04x $E06C=%04x\n", (unsigned long long)frames_, e022, e06c);
+        e022_logged_ = e022;
+        e06c_logged_ = e06c;
+    }
+    if (frames_ % 300) return;
+    const uint32_t* fb = vdp_.framebuffer();
+    uint64_t sig = 1469598103934665603ull;
+    for (int i = 0; i < width() * height(); i += 13) sig = (sig ^ fb[i]) * 1099511628211ull;
+    sig = (sig ^ cd_reads_) * 1099511628211ull;
+    sig = (sig ^ uint64_t(cdda_playing_ ? cdda_track_ : 0)) * 1099511628211ull;
+    sig = (sig ^ e022) * 1099511628211ull;
+    Cpu keep = cur_;
+    select_cpu(kMain);
+    uint32_t mpc = reg_get(M68K_REG_PC) & 0xFFFFFF;
+    select_cpu(kSub);
+    uint32_t spc = reg_get(M68K_REG_PC) & 0xFFFFFF;
+    select_cpu(keep);
+    log("[hb] f=%llu frame=%04x state=%04x mainpc=%06x subpc=%06x cd=%s lba=%u rem=%u reads=%llu cdda=%d/%d\n", (unsigned long long)frames_,
+        uint16_t(main_ram_[0xE020] << 8 | main_ram_[0xE021]), e022, mpc, spc, cdc_reading_ ? "reading" : "idle", cdc_lba_, cdc_remaining_,
+        (unsigned long long)cd_reads_, cdda_playing_, cdda_track_);
+    if (sig == hb_sig_) {
+        if (++hb_same_ == 6) {
+            log("[hb] f=%llu NOTICE: screen, CD activity and game state unchanged for 30 s. If the game looks hung, this is its state:\n", (unsigned long long)frames_);
+            dump_state();
+        }
+    } else {
+        hb_sig_ = sig;
+        hb_same_ = 0;
+    }
 }
 
 void System::dump_profile(int top) {
@@ -1429,7 +1546,7 @@ void System::audio_run(int samples) {
         auto on = [&](const char* n) { return !mute || !std::strstr(mute, n); };
         int l = (on("ym") ? ym_l_ : 0) + (on("pcm") ? pcm_l_ : 0) + (on("psg") ? psg_s_ / 2 : 0);
         int r = (on("ym") ? ym_r_ : 0) + (on("pcm") ? pcm_r_ : 0) + (on("psg") ? psg_s_ / 2 : 0);
-        if (cdda_playing_ && on("cdda")) {
+        if (cdda_playing_ && !cdda_paused_ && on("cdda")) {
             if (cdda_pos_ >= kRawSector) cdda_fetch();
             if (cdda_playing_) {
                 // 44.1 kHz source consumed with a simple accumulator.

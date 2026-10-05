@@ -18,6 +18,9 @@ extern "C" {
 
 namespace scd {
 
+// printf-style line to stderr and, when open_log() is active, the log file.
+void debug_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
 enum Button : uint16_t {
     kUp = 1 << 0, kDown = 1 << 1, kLeft = 1 << 2, kRight = 1 << 3,
     kB = 1 << 4, kC = 1 << 5, kA = 1 << 6, kStart = 1 << 7,
@@ -37,7 +40,10 @@ public:
     int width() const { return vdp_.width(); }
     int height() const { return vdp_.height(); }
     const uint32_t* framebuffer() const { return vdp_.framebuffer(); }
-    void set_pad(int port, uint16_t buttons) { pad_[port & 1] = buttons; }
+    void set_pad(int port, uint16_t buttons) {
+        if (dbg_log_ && buttons != pad_[port & 1]) log_pad(port & 1, buttons);
+        pad_[port & 1] = buttons;
+    }
     // Konami Justifier on port 2. x,y are in game screen pixels; buttons: bit0 trigger, bit1 start.
     void set_gun_connected(bool on) { gun_connected_ = on; }
     void set_gun(int x, int y, bool inside, uint8_t buttons) { gun_x_ = x; gun_y_ = y; gun_inside_ = inside; gun_buttons_ = buttons; }
@@ -59,8 +65,14 @@ public:
     uint8_t* prg_ram() { return prg_ram_; }
     uint8_t* word_ram() { return word_ram_; }
     Vdp& vdp() { return vdp_; }
-    // Prints PCs and key registers of both CPUs to stderr.
+    // Prints PCs and key registers of both CPUs, the CD state and the PCM channels to the log.
     void dump_state();
+    // Debug log file (SNATCHER_LOG / --log): everything log() prints plus CD loads, CD-DA, input changes, game-state
+    // changes, a heartbeat every ~5 s and a "no change for 30 s" notice. Truncates the file.
+    bool open_log(const std::string& path);
+    void close_log();
+    // 1x = a real drive (75 sectors/s, 0.3 s seeks); higher is faster. Set before init().
+    void set_cd_speed(double x) { cd_speed_ = x < 1.0 ? 1.0 : x; }
     bool bram_selftest();
     void enable_profile(bool on) { profile_ = on; pc_hist_[0].clear(); pc_hist_[1].clear(); }
     void dump_profile(int top);
@@ -212,6 +224,7 @@ private:
     uint8_t cdc_buf_[kUserData];
     uint8_t cdc_header_[4] = {};
     bool cdda_playing_ = false;
+    bool cdda_paused_ = false;   // MSCPAUSEON: position and track kept, silent, CDBSTAT reports $0500
     uint32_t cdda_lba_ = 0, cdda_end_ = 0;
     bool cdda_loop_ = false;
     int cdda_track_ = 0;
@@ -229,6 +242,14 @@ private:
     int16_t ym_l_ = 0, ym_r_ = 0, pcm_l_ = 0, pcm_r_ = 0, psg_s_ = 0;
 
     bool trace_bios_ = false;
+    bool comm_log_ = false;
+    bool dbg_log_ = false;      // open_log() active
+    double cd_speed_ = 1.0;
+    uint16_t e022_logged_ = 0xFFFF, e06c_logged_ = 0xFFFF;
+    uint64_t hb_sig_ = 0, cd_reads_ = 0;
+    int hb_same_ = 0;
+    void log_pad(int port, uint16_t buttons);
+    void debug_frame_end();   // SCD_COMMLOG: log every Gate Array comm register write
     bool profile_ = false;
     bool ovl_log_ = false;
     uint32_t cur_load_lba_ = 0;

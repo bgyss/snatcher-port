@@ -46,6 +46,8 @@ The `$28000` overlay is compressed on disc, so its translation input is a runtim
 
 `scd_headless` (no window) is the main debugging tool: `scd_headless <cue> --frames N --out DIR [--ppm-every N] [--press FRAME:BUTTONS:HOLD] [--wav f]`. Buttons are `U D L R B C A S`. Frame numbers count from the start of the run, and the game's first frame has `$FFE020 >= 1`. Useful env vars: `SCD_STOP_E020=<hex>` (stop at a game frame counter), `SCD_STATE=1`, `SCD_DEBUG=1`, `SCD_TRACE=cpu:frame:count`, `SCD_TRACE_BIOS=1`, `SCD_WATCH=<main RAM addr>`, `SCD_VDPLOG`, `SCD_VDPPORT`, `SCD_DUMP_RAM=1`, `SCD_VRAM=1`, `SCD_DUMP_AT=f1,f2`, `SCD_NO_TRANSLATE=1`, `SCD_LIFT_VERIFY=1`, `SCD_MUTE=ym,pcm,psg,cdda`, `SCD_GUN=x,y`, `SCD_BRAM_SELFTEST=1`.
 
+`tools/test_intro_skip.sh [scd_headless]` is the end-to-end regression for the intro skip / Act 1 hang (boots, skips the intro, expects the Junker HQ scene; works with `SCD_NO_TRANSLATE=1` too). Debug aids: `--log` / `SNATCHER_LOG=1` (app) or `SCD_LOG=file` (headless) write a persistent log, `F10` snapshots state, `SCD_COMMLOG=1` logs Gate Array comm writes, `SCD_PRGPOLL=addr,..` watches Sub PRG RAM bytes. In headless runs build `--press` lists in bash (zsh does not word-split an unquoted `$VAR`, which silently drops every press).
+
 There is no linter. Correctness is judged against MAME (below).
 
 ## Architecture
@@ -60,7 +62,7 @@ There is no linter. Correctness is judged against MAME (below).
 
 ## Oracle workflow (MAME)
 
-MAME is the ground truth. Lua scripts in `tools/emu/` (run via `mame segacd ... -autoboot_script`, with `-video none` if headless) dump screens, RAM, Word RAM, VDP port writes and per-frame state; `scripted_input.lua` presses pad buttons on the same game-frame numbering as `scd_headless --press`. MAME's savestate VRAM array appeared shifted by one word, so prefer screenshots and RAM dumps over it. BIOS dumps live in `~/mame/roms/segacd/` (not in the repo). Compare screenshots by pixel level after mapping MAME's DAC ramp (the title screen at `$FFE020 == 0x600` is the regression target, 100% identical).
+MAME is the ground truth. `nix develop` provides it (`mame`, 0.289); outside the shell use `nix build --no-link --print-out-paths --inputs-from . nixpkgs#mame` (the shell also builds the mingw-w64 cross compiler from source on Apple Silicon the first time, which takes a long while). `tools/emu/skip_probe.lua` replays the intro-skip scenario (`MAME_PRESSES="2400:S:5,2700:D:3,2760:D:3,2820:D:3,3000:C:3,7000:S:4" MAME_END=7700 mame segacd -rompath ~/mame/roms -cdrm <cue> -video none -sound none -nothrottle -autoboot_script tools/emu/skip_probe.lua`) and logs the real BIOS's drive mode/status per frame; read taps on `$5F22` only catch the first calls, so use the write taps / state polling in `cdbios_cmd_log.lua` or the BIOS dump from `dump_subbios.lua` for static analysis. Lua scripts in `tools/emu/` (run via `mame segacd ... -autoboot_script`, with `-video none` if headless) dump screens, RAM, Word RAM, VDP port writes and per-frame state; `scripted_input.lua` presses pad buttons on the same game-frame numbering as `scd_headless --press`. MAME's savestate VRAM array appeared shifted by one word, so prefer screenshots and RAM dumps over it. BIOS dumps live in `~/mame/roms/segacd/` (not in the repo). Compare screenshots by pixel level after mapping MAME's DAC ramp (the title screen at `$FFE020 == 0x600` is the regression target, 100% identical).
 
 ## Packaging notes
 

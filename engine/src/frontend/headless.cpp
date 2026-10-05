@@ -82,6 +82,10 @@ int main(int argc, char** argv) {
             if (std::sscanf(argv[++i], "%d:%15[^:]:%d", &f, b, &h) == 3) presses.push_back({f, parse_buttons(b), h});
         }
     }
+    if (const char* lf = std::getenv("SCD_LOG")) {   // debug log file, same as the app's --log
+        if (!System::instance().open_log(lf)) { std::fprintf(stderr, "error: cannot open %s\n", lf); return 1; }
+    }
+    if (const char* cs = std::getenv("SCD_CD_SPEED")) System::instance().set_cd_speed(std::atof(cs));
     std::string err;
     auto disc = Disc::open(cue, &err);
     if (!disc) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
@@ -96,6 +100,16 @@ int main(int argc, char** argv) {
     if (std::getenv("SCD_STACKAT") && std::getenv("SCD_FROM")) sys.set_trace_from(std::strtoull(std::getenv("SCD_FROM"), nullptr, 10));
     if (std::getenv("SCD_BRAM_SELFTEST")) { bool ok = sys.bram_selftest(); sys.shutdown(); std::printf("backup RAM selftest: %s\n", ok ? "PASS" : "FAIL"); return ok ? 0 : 1; }
     if (const char* g = std::getenv("SCD_GUN")) { int gx, gy; if (std::sscanf(g, "%d,%d", &gx, &gy) == 2) { sys.set_gun_connected(true); sys.set_gun(gx, gy, true, 0); } }
+    struct PrgPoll { uint32_t addr; uint8_t last; };
+    std::vector<PrgPoll> prg_poll;
+    if (const char* pl = std::getenv("SCD_PRGPOLL"))
+        for (const char* q = pl; *q;) {
+            char* e;
+            unsigned long a = std::strtoul(q, &e, 16);
+            if (e == q) break;
+            prg_poll.push_back({uint32_t(a) & 0x7FFFF, 0});
+            q = *e ? e + 1 : e;
+        }
     std::vector<int16_t> all_audio;
     Recorder rec;
     if (!video.empty() && !rec.start(video, sys.height(), codec, &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
@@ -114,6 +128,12 @@ int main(int argc, char** argv) {
             all_audio.insert(all_audio.end(), sys.audio().begin(), sys.audio().end());
         }
         sys.audio().clear();
+        if (!prg_poll.empty()) {  // SCD_PRGPOLL=hexaddr,hexaddr: report changes of Sub PRG RAM bytes
+            for (auto& pp : prg_poll) {
+                uint8_t v = sys.prg_ram()[pp.addr];
+                if (v != pp.last) { std::printf("[prg] f=%d %06x %02x -> %02x\n", f + 1, pp.addr, pp.last, v); pp.last = v; }
+            }
+        }
         if (std::getenv("SCD_STATE")) {
             const uint8_t* m = sys.main_ram();
             const uint8_t* p = sys.prg_ram();
