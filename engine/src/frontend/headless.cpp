@@ -120,8 +120,6 @@ int main(int argc, char** argv) {
     System& sys = System::instance();
     if (bram.empty() && std::getenv("SCD_SAVE")) bram = std::getenv("SCD_SAVE");
     const std::string bram_sha_at_start = bram.empty() ? "none" : sha1_file(bram);   // the core rewrites the file at shutdown
-    if (!sys.init(std::move(disc), bram, &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
-
     Replay replay;
     if (!replay_path.empty()) {
         FILE* rf = std::fopen(replay_path.c_str(), "rb");
@@ -134,9 +132,13 @@ int main(int argc, char** argv) {
         if (!Replay::parse(text, &replay, &err)) { std::fprintf(stderr, "error: %s: %s\n", replay_path.c_str(), err.c_str()); return 1; }
         std::string dsha = disc_sha1_from_cue(cue);
         if (!replay.disc_sha1.empty() && replay.disc_sha1 != dsha) { std::fprintf(stderr, "error: replay was recorded for disc %s, this disc is %s\n", replay.disc_sha1.c_str(), dsha.c_str()); return 4; }
+        if (replay.justifier) { std::fprintf(stderr, "error: replay was recorded with the Justifier; gun input is not recorded, so it cannot be replayed\n"); return 4; }
+        sys.set_cd_speed(replay.cd_speed);
         if (replay.bram_sha1 != bram_sha_at_start) { std::fprintf(stderr, "error: replay needs backup RAM %s, got %s (pass --bram)\n", replay.bram_sha1.c_str(), bram_sha_at_start.c_str()); return 4; }
-        sys.set_replay_play(&replay);
     }
+    if (!sys.init(std::move(disc), bram, &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+
+    if (!replay_path.empty()) sys.set_replay_play(&replay);
     Watchdog dog({hang_frames, 1800});
     const uint64_t stick_from = std::getenv("SCD_TEST_STICK_E020") ? std::strtoull(std::getenv("SCD_TEST_STICK_E020"), nullptr, 10) : 0;
     uint16_t stuck_val = 0;

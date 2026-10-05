@@ -57,6 +57,25 @@ class TestReplayRefusal(unittest.TestCase):
         self.assertIn("backup RAM", r.stderr)
 
     @needs_disc
+    def test_justifier_replay_refused(self):
+        r = self._run("# snatcher-replay v1\ndisc sha1=\nbram sha1=none\njustifier on\n")
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertIn("gun", r.stderr)
+
+    @needs_disc
+    def test_cdspeed_in_replay_is_applied(self):
+        out = ROOT / "work" / "pt_refuse"
+        out.mkdir(parents=True, exist_ok=True)
+        ck = {}
+        for speed in ("1.0", "4.0"):
+            rp = out / f"s{speed}.replay"
+            rp.write_text(f"# snatcher-replay v1\ndisc sha1=\nbram sha1=none\ncdspeed {speed}\n")
+            ck[speed] = out / f"s{speed}.ckpt"
+            r = run_headless("--frames", "1500", "--out", str(out), "--replay", str(rp), "--ckpt-out", str(ck[speed]))
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotEqual(ck["1.0"].read_text(), ck["4.0"].read_text())
+
+    @needs_disc
     def test_malformed_replay_reports_line(self):
         r = self._run("# snatcher-replay v1\n@0x10 Z\n")
         self.assertEqual(r.returncode, 1, r.stderr)
@@ -107,7 +126,7 @@ class TestDiff(unittest.TestCase):
         import ckpt_diff
         short = A.splitlines()[0] + "\n"
         d = ckpt_diff.first_diff(ckpt_diff.parse(A), ckpt_diff.parse(short))
-        self.assertEqual(d, {"ended_early": "B", "frame": 0xC8})
+        self.assertEqual(d, {"ended_early": "B", "frame": 0xC8, "ended_at": 0x64})
 
     def test_visible_only_skips_ram_noise(self):
         import ckpt_diff
@@ -121,6 +140,14 @@ class TestDiff(unittest.TestCase):
         import ckpt_diff
         b = A.replace("ram=2", "ram=9")
         self.assertIsNone(ckpt_diff.first_diff(ckpt_diff.parse(A), ckpt_diff.parse(b), fields=("vram", "fb")))
+
+    def test_ended_early_off_grid(self):
+        import ckpt_diff
+        long_run = A + "@0x12c scene=E022:0003/E06C:0001 vram=4 ram=5 fb=6\n"
+        short = A + "@0x100 scene=E022:0003/E06C:0001 vram=4 ram=5 fb=6\n"   # final line at the frame the short run stopped on
+        d = ckpt_diff.first_diff(ckpt_diff.parse(long_run), ckpt_diff.parse(short))
+        self.assertEqual(d.get("ended_early"), "B")
+        self.assertEqual(d.get("ended_at"), 0x100)
 
     def test_bad_line_reports_line_number(self):
         import ckpt_diff

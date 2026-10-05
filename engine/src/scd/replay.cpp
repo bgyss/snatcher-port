@@ -1,6 +1,7 @@
 #include "replay.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -108,6 +109,7 @@ bool Replay::parse(const std::string& text, Replay* out, std::string* err) {
     bool header = false;
     while (std::getline(in, line)) {
         ++n;
+        if (!line.empty() && line.back() == '\r') line.pop_back();   // CRLF checkouts / Windows-written files
         if (line.empty()) continue;
         if (line[0] == '#') {
             if (line != "# snatcher-replay v1") return fail(n, "unsupported or malformed header");
@@ -117,10 +119,13 @@ bool Replay::parse(const std::string& text, Replay* out, std::string* err) {
         if (!header) return fail(n, "missing '# snatcher-replay v1' header");
         if (line[0] == '@') {
             char* end;
+            if (line.size() < 2 || !std::isdigit(static_cast<unsigned char>(line[1]))) return fail(n, "bad frame");
             unsigned long long f = std::strtoull(line.c_str() + 1, &end, 0);
-            if (end == line.c_str() + 1 || *end != ' ') return fail(n, "bad frame");
+            if (*end != ' ') return fail(n, "bad frame");
             std::string b = end + 1;
-            for (char c : b) if (c != '-' && buttons_from_string(std::string(1, c)) == 0) return fail(n, std::string("unknown button '") + c + "'");
+            if (b.empty()) return fail(n, "missing buttons");
+            if (b != "-")
+                for (char c : b) if (buttons_from_string(std::string(1, c)) == 0) return fail(n, std::string("unknown button '") + c + "'");
             if (!r.events.empty() && f <= r.events.back().frame) return fail(n, "frames must be strictly increasing");
             r.events.push_back({f, buttons_from_string(b)});
             continue;

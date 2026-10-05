@@ -33,15 +33,22 @@ VISIBLE_FIELDS = ("vram", "fb")
 def first_diff(a: list, b: list, fields=ALL_FIELDS) -> Optional[dict]:
     """First checkpoint differing in one of `fields`, or None. `fb` = visible glitch; ram only = internal divergence
     (often benign: stale stack bytes below SP differ between the translated and interpreted builds)."""
-    for x, y in zip(a, b):
+    for i, (x, y) in enumerate(zip(a, b)):
         if x.frame != y.frame:
+            # Each run ends with a checkpoint at the frame it stopped on, which is usually off the periodic grid:
+            # a run whose last line has the smaller frame simply ended early.
+            if x.frame < y.frame and i == len(a) - 1:
+                return {"ended_early": "A", "frame": y.frame, "ended_at": x.frame}
+            if y.frame < x.frame and i == len(b) - 1:
+                return {"ended_early": "B", "frame": x.frame, "ended_at": y.frame}
             return {"frame": min(x.frame, y.frame), "scene": x.scene, "fields": ["frame"]}
         diff = [f for f in fields if getattr(x, f) != getattr(y, f)]
         if diff or x.scene != y.scene:
             return {"frame": x.frame, "scene": x.scene, "fields": diff or ["scene"]}
     if len(a) != len(b):
         longer = a if len(a) > len(b) else b
-        return {"ended_early": "B" if len(a) > len(b) else "A", "frame": longer[min(len(a), len(b))].frame}
+        shorter = b if len(a) > len(b) else a
+        return {"ended_early": "B" if len(a) > len(b) else "A", "frame": longer[min(len(a), len(b))].frame, "ended_at": shorter[-1].frame}
     return None
 
 

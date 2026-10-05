@@ -60,6 +60,15 @@ static void test_parse_errors() {
     assert(!Replay::parse("# snatcher-replay v9\n", &p, &err));             // unknown version
 }
 
+static void test_parse_accepts_crlf_and_rejects_negative_frame() {
+    Replay p;
+    std::string err;
+    assert(Replay::parse("# snatcher-replay v1\r\ndisc sha1=abc\r\n@0x10 U\r\n@0x20 -\r\n", &p, &err));
+    assert(p.disc_sha1 == "abc" && p.events.size() == 2 && p.events[1].buttons == 0);
+    assert(!Replay::parse("# snatcher-replay v1\n@-1 S\n", &p, &err));
+    assert(!Replay::parse("# snatcher-replay v1\n@0x10 \n", &p, &err));   // empty button field
+}
+
 static void test_sha1() {
     const char* path = "replay_test_sha1.tmp";
     FILE* f = std::fopen(path, "wb");
@@ -76,6 +85,7 @@ int main() {
     test_add_dedups_equal_consecutive();
     test_buttons();
     test_parse_errors();
+    test_parse_accepts_crlf_and_rejects_negative_frame();
     test_sha1();
     std::puts("replay_test: ok");
     return 0;
