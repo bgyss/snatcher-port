@@ -51,5 +51,30 @@ class TestReplayRefusal(unittest.TestCase):
         self.assertIn("line 2", r.stderr)
 
 
+class TestWatch(unittest.TestCase):
+    @needs_disc
+    def test_hang_detected_writes_bundle(self):
+        out = ROOT / "work" / "pt_hang"
+        out.mkdir(parents=True, exist_ok=True)
+        for f in out.glob("*"):
+            f.unlink()
+        # SCD_TEST_STICK_E020 pins the sampled frame counter from frame 20, a synthetic hang.
+        r = run_headless("--frames", "100", "--out", str(out), "--watch", "--hang-frames", "30", env={"SCD_TEST_STICK_E020": "20"})
+        self.assertEqual(r.returncode, 3, r.stderr)
+        for name in ("report.json", "final.ppm", "mainram.bin", "subram.bin", "repro.replay"):
+            self.assertTrue((out / name).exists(), name)
+        import json
+        rep = json.loads((out / "report.json").read_text())
+        self.assertEqual(rep["kind"], "hang")
+        self.assertIn("sub_pc", rep)
+
+    @needs_disc
+    def test_healthy_run_not_flagged(self):
+        out = ROOT / "work" / "pt_ok"
+        out.mkdir(parents=True, exist_ok=True)
+        r = run_headless("--frames", "1200", "--out", str(out), "--watch")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

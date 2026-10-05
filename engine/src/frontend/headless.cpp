@@ -1,6 +1,6 @@
 // Headless runner: boots a disc for N frames, optionally dumping frames and audio.
 //   scd_headless <disc.cue> [--frames N] [--ppm-every N --out DIR] [--wav out.wav] [--video out.mp4]
-//                [--press FRAME:BUTTONS:HOLD ...] [--replay FILE [--bram FILE]] [--ckpt-out FILE [--ckpt-every N]]
+//                [--press FRAME:BUTTONS:HOLD ...] [--replay FILE [--bram FILE]] [--ckpt-out FILE [--ckpt-every N]] [--watch [--hang-frames N]]
 // --video writes a 1440x1080 AAC demo video of the run, H.264 or with --video-codec h265 H.265 (needs ffmpeg, see recorder.h).
 // BUTTONS is a string of U D L R B C A S. Output stays in the directory given by --out.
 #include <algorithm>
@@ -14,6 +14,7 @@
 #include "recorder.h"
 #include "replay.h"
 #include "system.h"
+#include "watchdog.h"
 
 using namespace scd;
 
@@ -59,6 +60,24 @@ uint16_t parse_buttons(const std::string& s) {
     return b;
 }
 
+// Everything needed to look at a watchdog trip later: what tripped, both CPUs' PCs, the screen, RAM, and the input that got here.
+void write_failure_bundle(System& sys, const std::string& out, const Replay& trace, const WatchVerdict& v) {
+    uint32_t mpc, spc;
+    sys.cpu_pcs(&mpc, &spc);
+    const char* kind = v.kind == WatchVerdict::kHang ? "hang" : "halted";
+    if (FILE* f = std::fopen((out + "/report.json").c_str(), "w")) {
+        std::fprintf(f, "{\"kind\":\"%s\",\"frame\":%llu,\"since\":%llu,\"e020\":\"0x%04x\",\"e022\":\"0x%04x\",\"e06c\":\"0x%04x\",\"main_pc\":\"0x%06x\",\"sub_pc\":\"0x%06x\"}\n",
+                     kind, (unsigned long long)sys.frame_count(), (unsigned long long)v.since, sys.e020(), sys.e022(), sys.e06c(), mpc, spc);
+        std::fclose(f);
+    }
+    write_ppm(out + "/final.ppm", sys.framebuffer(), sys.width(), sys.height());
+    if (FILE* f = std::fopen((out + "/mainram.bin").c_str(), "wb")) { std::fwrite(sys.main_ram(), 1, 0x10000, f); std::fclose(f); }
+    if (FILE* f = std::fopen((out + "/subram.bin").c_str(), "wb")) { std::fwrite(sys.prg_ram() + 0x7000, 1, 0x6000, f); std::fclose(f); }
+    if (FILE* f = std::fopen((out + "/repro.replay").c_str(), "w")) { std::fputs(trace.serialize().c_str(), f); std::fclose(f); }
+    sys.dump_state();
+    std::fprintf(stderr, "[watch] %s at frame %llu (e020=%04x main_pc=%06x sub_pc=%06x); bundle in %s\n", kind, (unsigned long long)sys.frame_count(), sys.e020(), mpc, spc, out.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -67,7 +86,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::string cue = argv[1], out = ".", wav, video, codec = "h264";
-    int frames = 600, ppm_every = 0, ckpt_every = 300;
+    int frames = 600, ppm_every = 0, ckpt_every = 300, hang_frames = 300;
+    bool watch = false;
     std::string replay_path, ckpt_path, bram;
     std::vector<Press> presses;
     for (int i = 2; i < argc; ++i) {
@@ -82,6 +102,8 @@ int main(int argc, char** argv) {
         else if (a == "--ckpt-out" && i + 1 < argc) ckpt_path = argv[++i];
         else if (a == "--ckpt-every" && i + 1 < argc) ckpt_every = std::atoi(argv[++i]);
         else if (a == "--bram" && i + 1 < argc) bram = argv[++i];
+        else if (a == "--watch") watch = true;
+        else if (a == "--hang-frames" && i + 1 < argc) hang_frames = std::atoi(argv[++i]);
         else if (a == "--press" && i + 1 < argc) {
             int f, h;
             char b[16];
@@ -114,6 +136,17 @@ int main(int argc, char** argv) {
         if (!replay.disc_sha1.empty() && replay.disc_sha1 != dsha) { std::fprintf(stderr, "error: replay was recorded for disc %s, this disc is %s\n", replay.disc_sha1.c_str(), dsha.c_str()); return 4; }
         if (replay.bram_sha1 != bram_sha_at_start) { std::fprintf(stderr, "error: replay needs backup RAM %s, got %s (pass --bram)\n", replay.bram_sha1.c_str(), bram_sha_at_start.c_str()); return 4; }
         sys.set_replay_play(&replay);
+    }
+    Watchdog dog({hang_frames, 1800});
+    const uint64_t stick_from = std::getenv("SCD_TEST_STICK_E020") ? std::strtoull(std::getenv("SCD_TEST_STICK_E020"), nullptr, 10) : 0;
+    uint16_t stuck_val = 0;
+    bool stuck_set = false;
+    Replay trace;   // the pad stream actually applied, for the failure bundle's repro.replay
+    if (watch) {
+        trace.disc_sha1 = disc_sha1_from_cue(cue);
+        trace.bram_sha1 = bram_sha_at_start;
+        trace.engine = "scd_headless --watch";
+        sys.set_replay_record(&trace);
     }
     FILE* ckpt = nullptr;
     uint16_t last22 = 0xFFFF, last6c = 0xFFFF;
@@ -156,6 +189,18 @@ int main(int argc, char** argv) {
         sys.run_frame();
         if (frametime) ft.push_back({std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), f + 1});
         rec.frame(sys.framebuffer(), sys.width(), sys.height(), sys.audio());
+        if (watch) {
+            uint16_t e20 = sys.e020();
+            if (stick_from && sys.frame_count() >= stick_from) { if (!stuck_set) { stuck_val = e20; stuck_set = true; } e20 = stuck_val; }   // SCD_TEST_STICK_E020: test hook, samples only
+            WatchVerdict v = dog.feed({sys.frame_count(), e20, sys.state_hash().fb, sys.halted()});
+            if (v.kind == WatchVerdict::kStillScreen) std::fprintf(stderr, "[watch] warning: screen unchanged since frame %llu\n", (unsigned long long)v.since);
+            else if (v.kind != WatchVerdict::kOk) {
+                if (ckpt) { emit_ckpt(); std::fclose(ckpt); }
+                write_failure_bundle(sys, out, trace, v);
+                sys.shutdown();
+                return 3;
+            }
+        }
         if (ckpt) {
             bool changed = sys.e022() != last22 || sys.e06c() != last6c;
             if (changed || (ckpt_every > 0 && sys.frame_count() % ckpt_every == 0)) emit_ckpt();
