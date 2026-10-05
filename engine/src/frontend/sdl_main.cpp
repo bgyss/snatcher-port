@@ -1,5 +1,6 @@
 // SDL3 front-end: window, audio, keyboard and gamepad input for the Sega CD core.
 //   snatcher <disc.cue> [--justifier] [--record FILE.mp4] [--video-codec h264|h265]   (or drop a .cue file onto the window)
+//   --record-input FILE: save pad input per emulated frame (a .replay for scd_headless --replay) and the starting backup RAM (FILE.bram)
 //   --justifier: mouse is the Konami Justifier on port 2 (left = trigger, right = start)
 //   --record: record a demo video from boot; F9 starts/stops a recording at any time (default ~/Movies/snatcher-<time>.mp4).
 //   Videos are 1440x1080 with AAC audio, H.264 unless --video-codec h265; the final encode runs in the background.
@@ -11,12 +12,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "recorder.h"
+#include "replay.h"
 #include "system.h"
 
 using namespace scd;
@@ -113,7 +116,7 @@ int main(int argc, char** argv) {
     bool gun = false;
     bool want_log = std::getenv("SNATCHER_LOG") != nullptr;
     double cd_speed = std::getenv("SCD_CD_SPEED") ? std::atof(std::getenv("SCD_CD_SPEED")) : 1.0;
-    std::string disc, record_path, codec = "h264";
+    std::string disc, record_path, record_input, codec = "h264";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--justifier") gun = true;
@@ -121,6 +124,7 @@ int main(int argc, char** argv) {
         else if (a == "--cd-speed" && i + 1 < argc) cd_speed = std::atof(argv[++i]);
         else if (a == "--record" && i + 1 < argc) record_path = argv[++i];
         else if (a == "--video-codec" && i + 1 < argc) codec = argv[++i];
+        else if (a == "--record-input" && i + 1 < argc) record_input = argv[++i];
         else disc = a;
     }
     System::instance().set_cd_speed(cd_speed);
@@ -140,7 +144,34 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "could not open debug log %s\n", path.c_str());
         }
     }
+    // --record-input: keep the backup RAM the session starts with (the replay is only valid against it) and log pad input per frame.
+    Replay input_replay;
+    if (!record_input.empty()) {   // an hour-long freeze hunt must not be lost to a missing directory: fail now, not at exit
+        std::ofstream probe(record_input, std::ios::binary);
+        if (!probe) { std::fprintf(stderr, "error: cannot write %s (does the directory exist?)\n", record_input.c_str()); return 1; }
+    }
+    bool recording_booted = false;   // the replay stays savable after a CPU halt, which clears running_game
+    if (!record_input.empty() && !disc.empty()) {
+        char* pref = SDL_GetPrefPath("snatcher-port", "snatcher");
+        std::string bram = std::string(pref ? pref : "") + "bram.bin";
+        SDL_free(pref);
+        input_replay.bram_sha1 = sha1_file(bram);
+        if (input_replay.bram_sha1 != "none") {
+            std::ifstream src(bram, std::ios::binary);
+            std::ofstream dst(record_input + ".bram", std::ios::binary);
+            dst << src.rdbuf();
+            if (!dst) { std::fprintf(stderr, "error: cannot write %s.bram\n", record_input.c_str()); return 1; }
+        }
+        input_replay.disc_sha1 = disc_sha1_from_cue(disc);
+        input_replay.engine = "snatcher app";
+        input_replay.cd_speed = cd_speed;
+        input_replay.justifier = gun;
+    } else if (!record_input.empty()) {
+        std::fprintf(stderr, "--record-input needs the disc on the command line\n");
+        record_input.clear();
+    }
     if (!disc.empty()) boot(disc, &running_game);
+    if (!record_input.empty() && running_game) { System::instance().set_replay_record(&input_replay); recording_booted = true; }
     System::instance().set_gun_connected(gun);   // the controller ID is read at boot: start with --justifier to get the Gun Adjust option
     SDL_SetWindowTitle(window, running_game ? "Snatcher" : "Snatcher - drop a .cue file on this window");
 
@@ -210,6 +241,10 @@ int main(int argc, char** argv) {
             if (e.type == SDL_EVENT_QUIT) quit = true;
             else if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) {
                 stop_recording();
+                if (recording_booted) {   // frames restart at 0 and the disc/backup RAM change: keep what was recorded so far, stop recording
+                    System::instance().set_replay_record(nullptr);
+                    std::fprintf(stderr, "--record-input: a new disc was dropped, input recording stopped (saved at exit)\n");
+                }
                 if (running_game) System::instance().shutdown();
                 running_game = false;
                 if (boot(e.drop.data, &running_game)) SDL_SetWindowTitle(window, "Snatcher");
@@ -301,6 +336,14 @@ int main(int argc, char** argv) {
     stop_recording();
     if (!encoders.empty()) std::fprintf(stderr, "finishing video encode...\n");
     for (auto& t : encoders) t.join();
+    if (!record_input.empty() && recording_booted) {   // also after a CPU halt: a crash session is the one worth replaying
+        System::instance().set_replay_record(nullptr);
+        std::ofstream out(record_input, std::ios::binary);
+        out << input_replay.serialize();
+        out.close();
+        if (out) std::fprintf(stderr, "saved %s\n", record_input.c_str());
+        else std::fprintf(stderr, "error: could not write %s\n", record_input.c_str());
+    }
     if (running_game) System::instance().shutdown();
     System::instance().close_log();
     SDL_Quit();

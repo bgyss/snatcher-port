@@ -613,6 +613,8 @@ void System::run_cpu(Cpu c, int cycles) {
 
 void System::run_frame() {
     if (halted_) return;
+    if (replay_play_) set_pad(0, replay_play_->buttons_at(frames_));
+    if (replay_rec_) replay_rec_->add(frames_, pad_[0]);
     const int active = vdp_.active_lines();
     for (line_ = 0; line_ < kLines; ++line_) {
         vdp_.begin_line(line_);
@@ -1455,6 +1457,35 @@ void System::log_pad(int port, uint16_t b) {
     log("[pad] f=%llu port%d %s\n", (unsigned long long)frames_, port + 1, n ? s : "-");
 }
 
+static uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
+    auto* b = static_cast<const uint8_t*>(p);
+    for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
+    return h;
+}
+
+StateHash System::state_hash() {
+    StateHash s;
+    uint64_t h = fnv(vdp_.vram(), 0x10000);
+    h = fnv(vdp_.cram(), 64 * 2, h);
+    h = fnv(vdp_.vsram(), 64 * 2, h);
+    for (int i = 0; i < 24; ++i) { uint8_t r = vdp_.reg(i); h = fnv(&r, 1, h); }
+    s.vram = h;
+    // RAM: all of Main RAM plus the Sub program/data window the debug dumps use. Tune this window if the determinism
+    // gate shows false positives from uninitialised areas (record which bytes differ, then mask them).
+    s.ram = fnv(prg_ram_ + 0x7000, 0x6000, fnv(main_ram_, sizeof main_ram_));
+    s.fb = fnv(vdp_.framebuffer(), size_t(width()) * height() * sizeof(uint32_t));
+    return s;
+}
+
+void System::cpu_pcs(uint32_t* main_pc, uint32_t* sub_pc) {
+    Cpu keep = cur_;
+    select_cpu(kMain);
+    *main_pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
+    select_cpu(kSub);
+    *sub_pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
+    select_cpu(keep);
+}
+
 // Called once per emulated frame while the log is open: game-state changes, a heartbeat every 300 frames (~5 s) and a
 // notice when nothing observable (screen, CD, CD-DA, game state) has changed for 6 heartbeats.
 void System::debug_frame_end() {
@@ -1471,12 +1502,8 @@ void System::debug_frame_end() {
     sig = (sig ^ cd_reads_) * 1099511628211ull;
     sig = (sig ^ uint64_t(cdda_playing_ ? cdda_track_ : 0)) * 1099511628211ull;
     sig = (sig ^ e022) * 1099511628211ull;
-    Cpu keep = cur_;
-    select_cpu(kMain);
-    uint32_t mpc = reg_get(M68K_REG_PC) & 0xFFFFFF;
-    select_cpu(kSub);
-    uint32_t spc = reg_get(M68K_REG_PC) & 0xFFFFFF;
-    select_cpu(keep);
+    uint32_t mpc, spc;
+    cpu_pcs(&mpc, &spc);
     log("[hb] f=%llu frame=%04x state=%04x mainpc=%06x subpc=%06x cd=%s lba=%u rem=%u reads=%llu cdda=%d/%d\n", (unsigned long long)frames_,
         uint16_t(main_ram_[0xE020] << 8 | main_ram_[0xE021]), e022, mpc, spc, cdc_reading_ ? "reading" : "idle", cdc_lba_, cdc_remaining_,
         (unsigned long long)cd_reads_, cdda_playing_, cdda_track_);

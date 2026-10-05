@@ -10,6 +10,7 @@
 #include "disc.h"
 #include "pcm.h"
 #include "psg.h"
+#include "replay.h"
 #include "vdp.h"
 
 extern "C" {
@@ -27,6 +28,8 @@ enum Button : uint16_t {
 };
 
 constexpr int kSampleRate = 48000;
+
+struct StateHash { uint64_t vram, ram, fb; };
 
 class System {
 public:
@@ -48,6 +51,10 @@ public:
     void set_gun_connected(bool on) { gun_connected_ = on; }
     void set_gun(int x, int y, bool inside, uint8_t buttons) { gun_x_ = x; gun_y_ = y; gun_inside_ = inside; gun_buttons_ = buttons; }
 
+    // Replay hooks (run_frame start): play overrides port 1's pad, record logs port 1's pad per emulated frame.
+    void set_replay_play(const Replay* r) { replay_play_ = r; }
+    void set_replay_record(Replay* r) { replay_rec_ = r; }
+
     // Interleaved stereo samples produced since the last call.
     std::vector<int16_t>& audio() { return audio_; }
 
@@ -65,6 +72,12 @@ public:
     uint8_t* prg_ram() { return prg_ram_; }
     uint8_t* word_ram() { return word_ram_; }
     Vdp& vdp() { return vdp_; }
+    // FNV-1a hashes of VDP memory+registers, RAM and the framebuffer (playtest checkpoints).
+    StateHash state_hash();
+    void cpu_pcs(uint32_t* main_pc, uint32_t* sub_pc);
+    uint16_t e020() const { return uint16_t(main_ram_[0xE020] << 8 | main_ram_[0xE021]); }
+    uint16_t e022() const { return uint16_t(main_ram_[0xE022] << 8 | main_ram_[0xE023]); }
+    uint16_t e06c() const { return uint16_t(main_ram_[0xE06C] << 8 | main_ram_[0xE06D]); }
     // Prints PCs and key registers of both CPUs, the CD state and the PCM channels to the log.
     void dump_state();
     // Debug log file (SNATCHER_LOG / --log): everything log() prints plus CD loads, CD-DA, input changes, game-state
@@ -206,6 +219,8 @@ private:
 
     // Controllers
     uint16_t pad_[2] = {0, 0};
+    const Replay* replay_play_ = nullptr;
+    Replay* replay_rec_ = nullptr;
     bool gun_connected_ = false, gun_inside_ = false;
     int gun_x_ = 0, gun_y_ = 0;
     uint8_t gun_buttons_ = 0;

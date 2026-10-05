@@ -62,3 +62,17 @@ run = "engine/build/snatcher \"$SCD_CUE\" --record \"${VIDEO_OUT:-work/demo/snat
 [tasks."check:macos-present"]
 description = "Re-check the macOS Metal present stalls (docs/MACOS_NOTES.md)"
 run = "tools/macos/check_present.sh"
+
+[tasks.test-playtest]
+description = "Playtest harness unit and end-to-end tests (replay format, watchdog, checkpoints, runner)"
+run = [
+  "cmake -S engine -B engine/build-interp -DCMAKE_BUILD_TYPE=Release",
+  "cmake --build engine/build-interp -j --target scd_headless replay_test watchdog_test",
+  "engine/build-interp/replay_test",
+  "engine/build-interp/watchdog_test",
+  "SCD_HEADLESS=engine/build-interp/scd_headless python tools/playtest/test_playtest.py",
+]
+
+[tasks.playtest]
+description = "Run a replay headless with the watchdog: mise run playtest tools/playtest/replays/intro_skip.replay (docs/PLAYTEST.md)"
+run = "python tools/playtest/run.py {{arg(name='replay')}} --headless ${PLAYTEST_HEADLESS:-engine/build-interp/scd_headless} ${PLAYTEST_ARGS:-}"

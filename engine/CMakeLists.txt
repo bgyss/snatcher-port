@@ -36,7 +36,7 @@ target_include_directories(nuked_opn2 PUBLIC third_party/nuked-opn2)
 
 # ---- Core (no platform dependencies)
 add_library(scdcore STATIC
-  src/scd/disc.cpp src/scd/vdp.cpp src/scd/pcm.cpp src/scd/psg.cpp src/scd/system.cpp)
+  src/scd/disc.cpp src/scd/vdp.cpp src/scd/pcm.cpp src/scd/psg.cpp src/scd/system.cpp src/scd/replay.cpp)
 target_include_directories(scdcore PUBLIC src/scd src/lift)
 
 # Optional: build-time translation of the Sub CPU program from the user's own disc blobs
@@ -69,6 +69,12 @@ target_link_libraries(scdcore PUBLIC musashi nuked_opn2)
 # ---- Headless runner (tests, oracle captures)
 add_executable(scd_headless src/frontend/headless.cpp)
 target_link_libraries(scd_headless PRIVATE scdcore)
+
+add_executable(replay_test tests/replay_test.cpp)
+target_link_libraries(replay_test PRIVATE scdcore)
+
+add_executable(watchdog_test tests/watchdog_test.cpp)
+target_include_directories(watchdog_test PRIVATE src/scd)
 
 # ---- SDL3 front-end
 if(NOT SNATCHER_FETCH_SDL)
