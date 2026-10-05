@@ -613,6 +613,8 @@ void System::run_cpu(Cpu c, int cycles) {
 
 void System::run_frame() {
     if (halted_) return;
+    if (replay_play_) set_pad(0, replay_play_->buttons_at(frames_));
+    if (replay_rec_) replay_rec_->add(frames_, pad_[0]);
     const int active = vdp_.active_lines();
     for (line_ = 0; line_ < kLines; ++line_) {
         vdp_.begin_line(line_);

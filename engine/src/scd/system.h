@@ -10,6 +10,7 @@
 #include "disc.h"
 #include "pcm.h"
 #include "psg.h"
+#include "replay.h"
 #include "vdp.h"
 
 extern "C" {
@@ -47,6 +48,10 @@ public:
     // Konami Justifier on port 2. x,y are in game screen pixels; buttons: bit0 trigger, bit1 start.
     void set_gun_connected(bool on) { gun_connected_ = on; }
     void set_gun(int x, int y, bool inside, uint8_t buttons) { gun_x_ = x; gun_y_ = y; gun_inside_ = inside; gun_buttons_ = buttons; }
+
+    // Replay hooks (run_frame start): play overrides port 1's pad, record logs port 1's pad per emulated frame.
+    void set_replay_play(const Replay* r) { replay_play_ = r; }
+    void set_replay_record(Replay* r) { replay_rec_ = r; }
 
     // Interleaved stereo samples produced since the last call.
     std::vector<int16_t>& audio() { return audio_; }
@@ -206,6 +211,8 @@ private:
 
     // Controllers
     uint16_t pad_[2] = {0, 0};
+    const Replay* replay_play_ = nullptr;
+    Replay* replay_rec_ = nullptr;
     bool gun_connected_ = false, gun_inside_ = false;
     int gun_x_ = 0, gun_y_ = 0;
     uint8_t gun_buttons_ = 0;
