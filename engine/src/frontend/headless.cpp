@@ -1,6 +1,6 @@
 // Headless runner: boots a disc for N frames, optionally dumping frames and audio.
 //   scd_headless <disc.cue> [--frames N] [--ppm-every N --out DIR] [--wav out.wav] [--video out.mp4]
-//                [--press FRAME:BUTTONS:HOLD ...]
+//                [--press FRAME:BUTTONS:HOLD ...] [--replay FILE [--bram FILE]] [--ckpt-out FILE [--ckpt-every N]]
 // --video writes a 1440x1080 AAC demo video of the run, H.264 or with --video-codec h265 H.265 (needs ffmpeg, see recorder.h).
 // BUTTONS is a string of U D L R B C A S. Output stays in the directory given by --out.
 #include <algorithm>
@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "recorder.h"
+#include "replay.h"
 #include "system.h"
 
 using namespace scd;
@@ -66,7 +67,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::string cue = argv[1], out = ".", wav, video, codec = "h264";
-    int frames = 600, ppm_every = 0;
+    int frames = 600, ppm_every = 0, ckpt_every = 300;
+    std::string replay_path, ckpt_path, bram;
     std::vector<Press> presses;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -76,6 +78,10 @@ int main(int argc, char** argv) {
         else if (a == "--wav" && i + 1 < argc) wav = argv[++i];
         else if (a == "--video" && i + 1 < argc) video = argv[++i];
         else if (a == "--video-codec" && i + 1 < argc) codec = argv[++i];
+        else if (a == "--replay" && i + 1 < argc) replay_path = argv[++i];
+        else if (a == "--ckpt-out" && i + 1 < argc) ckpt_path = argv[++i];
+        else if (a == "--ckpt-every" && i + 1 < argc) ckpt_every = std::atoi(argv[++i]);
+        else if (a == "--bram" && i + 1 < argc) bram = argv[++i];
         else if (a == "--press" && i + 1 < argc) {
             int f, h;
             char b[16];
@@ -90,7 +96,33 @@ int main(int argc, char** argv) {
     auto disc = Disc::open(cue, &err);
     if (!disc) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
     System& sys = System::instance();
-    if (!sys.init(std::move(disc), std::getenv("SCD_SAVE") ? std::getenv("SCD_SAVE") : "", &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    if (bram.empty() && std::getenv("SCD_SAVE")) bram = std::getenv("SCD_SAVE");
+    const std::string bram_sha_at_start = bram.empty() ? "none" : sha1_file(bram);   // the core rewrites the file at shutdown
+    if (!sys.init(std::move(disc), bram, &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+
+    Replay replay;
+    if (!replay_path.empty()) {
+        FILE* rf = std::fopen(replay_path.c_str(), "rb");
+        if (!rf) { std::fprintf(stderr, "error: cannot open %s\n", replay_path.c_str()); return 1; }
+        std::string text;
+        char rbuf[4096];
+        size_t rn;
+        while ((rn = std::fread(rbuf, 1, sizeof rbuf, rf)) > 0) text.append(rbuf, rn);
+        std::fclose(rf);
+        if (!Replay::parse(text, &replay, &err)) { std::fprintf(stderr, "error: %s: %s\n", replay_path.c_str(), err.c_str()); return 1; }
+        std::string dsha = disc_sha1_from_cue(cue);
+        if (!replay.disc_sha1.empty() && replay.disc_sha1 != dsha) { std::fprintf(stderr, "error: replay was recorded for disc %s, this disc is %s\n", replay.disc_sha1.c_str(), dsha.c_str()); return 4; }
+        if (replay.bram_sha1 != bram_sha_at_start) { std::fprintf(stderr, "error: replay needs backup RAM %s, got %s (pass --bram)\n", replay.bram_sha1.c_str(), bram_sha_at_start.c_str()); return 4; }
+        sys.set_replay_play(&replay);
+    }
+    FILE* ckpt = nullptr;
+    uint16_t last22 = 0xFFFF, last6c = 0xFFFF;
+    if (!ckpt_path.empty() && !(ckpt = std::fopen(ckpt_path.c_str(), "w"))) { std::fprintf(stderr, "error: cannot open %s\n", ckpt_path.c_str()); return 1; }
+    auto emit_ckpt = [&]() {
+        StateHash h = sys.state_hash();
+        std::fprintf(ckpt, "@0x%llx scene=E022:%04x/E06C:%04x vram=%016llx ram=%016llx fb=%016llx\n", (unsigned long long)sys.frame_count(),
+                     sys.e022(), sys.e06c(), (unsigned long long)h.vram, (unsigned long long)h.ram, (unsigned long long)h.fb);
+    };
 
     const int profile_from = std::getenv("SCD_PROFILE") ? std::atoi(std::getenv("SCD_PROFILE")) : -1;
     if (const char* t = std::getenv("SCD_TRACE")) {  // cpu:frame:count
@@ -124,6 +156,11 @@ int main(int argc, char** argv) {
         sys.run_frame();
         if (frametime) ft.push_back({std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), f + 1});
         rec.frame(sys.framebuffer(), sys.width(), sys.height(), sys.audio());
+        if (ckpt) {
+            bool changed = sys.e022() != last22 || sys.e06c() != last6c;
+            if (changed || (ckpt_every > 0 && sys.frame_count() % ckpt_every == 0)) emit_ckpt();
+            last22 = sys.e022(); last6c = sys.e06c();
+        }
         if (!wav.empty()) {
             all_audio.insert(all_audio.end(), sys.audio().begin(), sys.audio().end());
         }
@@ -174,6 +211,7 @@ int main(int argc, char** argv) {
             write_ppm(out + name, sys.framebuffer(), sys.width(), sys.height());
         }
     }
+    if (ckpt) { emit_ckpt(); std::fclose(ckpt); }
     if (frametime && !ft.empty()) {
         double sum = 0; int over = 0;
         for (auto& [ms, fr] : ft) { sum += ms; over += ms > 1000.0 / 59.9227; }
