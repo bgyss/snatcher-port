@@ -1,0 +1,18 @@
+# snatcher-replay v1
+disc sha1=
+bram sha1=none
+engine press_to_replay
+cdspeed 1.0
+justifier off
+@0x960 S
+@0x965 -
+@0xa8c D
+@0xa8f -
+@0xac8 D
+@0xacb -
+@0xb04 D
+@0xb07 -
+@0xbb8 C
+@0xbbb -
+@0x1b58 S
+@0x1b5c -

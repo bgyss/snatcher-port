@@ -151,7 +151,10 @@ int main(int argc, char** argv) {
     FILE* ckpt = nullptr;
     uint16_t last22 = 0xFFFF, last6c = 0xFFFF;
     if (!ckpt_path.empty() && !(ckpt = std::fopen(ckpt_path.c_str(), "w"))) { std::fprintf(stderr, "error: cannot open %s\n", ckpt_path.c_str()); return 1; }
+    uint64_t last_emitted = ~0ull;
     auto emit_ckpt = [&]() {
+        if (sys.frame_count() == last_emitted) return;   // the backstop and the exit line can land on the same frame
+        last_emitted = sys.frame_count();
         StateHash h = sys.state_hash();
         std::fprintf(ckpt, "@0x%llx scene=E022:%04x/E06C:%04x vram=%016llx ram=%016llx fb=%016llx\n", (unsigned long long)sys.frame_count(),
                      sys.e022(), sys.e06c(), (unsigned long long)h.vram, (unsigned long long)h.ram, (unsigned long long)h.fb);

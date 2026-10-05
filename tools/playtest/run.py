@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--cue", default=str(DEFAULT_CUE))
     ap.add_argument("--frames", type=int, default=20000)
     ap.add_argument("--bram")
+    ap.add_argument("--strict-ram", action="store_true", help="fail on RAM-only differences too")
     ap.add_argument("--determinism", action="store_true", help="run the same build twice and compare")
     ap.add_argument("--work", default=str(ROOT / "work" / "playtest"))
     a = ap.parse_args()
@@ -60,10 +61,17 @@ def main():
     if rc != 0:
         print(f"B failed (exit {rc}):\n{err}")
         return rc
-    d = ckpt_diff.first_diff(ckpt_diff.parse(ck_a.read_text()), ckpt_diff.parse(ck_b.read_text()))
-    if d:
-        print(f"DIVERGED: {d}  (fb in fields = visible glitch)")
+    pa, pb = ckpt_diff.parse(ck_a.read_text()), ckpt_diff.parse(ck_b.read_text())
+    visible = ckpt_diff.first_diff(pa, pb, ckpt_diff.VISIBLE_FIELDS)
+    anything = ckpt_diff.first_diff(pa, pb)
+    if visible:
+        print(f"DIVERGED (visible): {visible}\n  first difference of any kind: {anything}")
         return 1
+    if anything:
+        print(f"RAM-only difference (screen and VRAM match everywhere): {anything}")
+        if a.strict_ram:
+            return 1
+        return 0
     print("ok: builds match at every checkpoint")
     return 0
 

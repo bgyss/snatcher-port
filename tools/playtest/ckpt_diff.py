@@ -26,14 +26,19 @@ def parse(text: str) -> list:
     return out
 
 
-def first_diff(a: list, b: list) -> Optional[dict]:
-    """First differing checkpoint, or None. `fb` in fields = visible glitch; ram/vram only = internal divergence."""
+ALL_FIELDS = ("vram", "ram", "fb")
+VISIBLE_FIELDS = ("vram", "fb")
+
+
+def first_diff(a: list, b: list, fields=ALL_FIELDS) -> Optional[dict]:
+    """First checkpoint differing in one of `fields`, or None. `fb` = visible glitch; ram only = internal divergence
+    (often benign: stale stack bytes below SP differ between the translated and interpreted builds)."""
     for x, y in zip(a, b):
         if x.frame != y.frame:
             return {"frame": min(x.frame, y.frame), "scene": x.scene, "fields": ["frame"]}
-        fields = [f for f in ("vram", "ram", "fb") if getattr(x, f) != getattr(y, f)]
-        if fields or x.scene != y.scene:
-            return {"frame": x.frame, "scene": x.scene, "fields": fields or ["scene"]}
+        diff = [f for f in fields if getattr(x, f) != getattr(y, f)]
+        if diff or x.scene != y.scene:
+            return {"frame": x.frame, "scene": x.scene, "fields": diff or ["scene"]}
     if len(a) != len(b):
         longer = a if len(a) > len(b) else b
         return {"ended_early": "B" if len(a) > len(b) else "A", "frame": longer[min(len(a), len(b))].frame}

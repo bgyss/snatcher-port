@@ -24,6 +24,17 @@ class TestCheckpoints(unittest.TestCase):
         self.assertEqual(a.read_text(), b.read_text())
         self.assertGreaterEqual(len(a.read_text().splitlines()), 4)
 
+    @needs_disc
+    def test_checkpoint_frames_strictly_increase(self):
+        out = ROOT / "work" / "pt_test"
+        out.mkdir(parents=True, exist_ok=True)
+        f = out / "mono.ckpt"
+        # 400 is a multiple of --ckpt-every, so the last frame is emitted by the backstop and again at exit
+        r = run_headless("--frames", "400", "--out", str(out), "--ckpt-out", str(f), "--ckpt-every", "100")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        frames = [int(l.split()[0][3:], 16) for l in f.read_text().splitlines()]
+        self.assertEqual(frames, sorted(set(frames)))
+
 
 class TestReplayRefusal(unittest.TestCase):
     def _run(self, text, *extra):
@@ -97,6 +108,19 @@ class TestDiff(unittest.TestCase):
         short = A.splitlines()[0] + "\n"
         d = ckpt_diff.first_diff(ckpt_diff.parse(A), ckpt_diff.parse(short))
         self.assertEqual(d, {"ended_early": "B", "frame": 0xC8})
+
+    def test_visible_only_skips_ram_noise(self):
+        import ckpt_diff
+        b = A.replace("ram=2", "ram=9").replace("fb=6", "fb=7")   # ram differs at the first checkpoint, fb at the second
+        d = ckpt_diff.first_diff(ckpt_diff.parse(A), ckpt_diff.parse(b), fields=("vram", "fb"))
+        self.assertEqual(d["frame"], 0xC8)
+        self.assertEqual(d["fields"], ["fb"])
+        self.assertEqual(ckpt_diff.first_diff(ckpt_diff.parse(A), ckpt_diff.parse(b))["frame"], 0x64)
+
+    def test_ram_only_is_not_visible(self):
+        import ckpt_diff
+        b = A.replace("ram=2", "ram=9")
+        self.assertIsNone(ckpt_diff.first_diff(ckpt_diff.parse(A), ckpt_diff.parse(b), fields=("vram", "fb")))
 
     def test_bad_line_reports_line_number(self):
         import ckpt_diff
