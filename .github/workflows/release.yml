@@ -38,7 +38,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          flags=(--title "Snatcher port ${GITHUB_REF_NAME}" --generate-notes --verify-tag)
+          flags=(--title "${GITHUB_REF_NAME}" --generate-notes --verify-tag)
           case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
           notes=$'No game data is included: you need your own US Sega CD disc image (.cue + .bin).\nSee the README inside each package. The macOS and Windows builds are unsigned, so the OS will warn on first launch.'
           gh release create "$GITHUB_REF_NAME" release/* "${flags[@]}" --notes "$notes"
