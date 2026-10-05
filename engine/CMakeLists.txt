@@ -76,6 +76,9 @@ target_link_libraries(replay_test PRIVATE scdcore)
 add_executable(watchdog_test tests/watchdog_test.cpp)
 target_include_directories(watchdog_test PRIVATE src/scd)
 
+add_executable(coverage_test tests/coverage_test.cpp)
+target_include_directories(coverage_test PRIVATE src/scd)
+
 # ---- SDL3 front-end
 if(NOT SNATCHER_FETCH_SDL)
   find_package(SDL3 CONFIG QUIET)

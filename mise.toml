@@ -76,3 +76,11 @@ run = [
 [tasks.playtest]
 description = "Run a replay headless with the watchdog: mise run playtest tools/playtest/replays/intro_skip.replay (docs/PLAYTEST.md)"
 run = "python tools/playtest/run.py {{arg(name='replay')}} --headless ${PLAYTEST_HEADLESS:-engine/build-interp/scd_headless} ${PLAYTEST_ARGS:-}"
+
+[tasks.test-recomp]
+description = "ADR-003 tests: coverage census, coverage report, translator seeds and overlays"
+run = [
+  "cmake -S engine -B engine/build-interp -DCMAKE_BUILD_TYPE=Release",
+  "cmake --build engine/build-interp -j --target scd_headless coverage_test",
+  "engine/build-interp/coverage_test",
+]
