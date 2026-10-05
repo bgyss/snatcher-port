@@ -275,6 +275,10 @@ private:
     Coverage cov_;
     bool cov_on_ = false;
     Fallback fallback_why_ = Fallback::kInterpreter;   // cause of the Musashi steps about to run (read by trace_pc)
+    void note_overlay_exec();                         // first execution at $28000 after a load: tag (and with SCD_DUMP_OVERLAYS dump) the image
+    std::string ovl_dump_dir_;
+    bool ovl_track_ = false;                          // census or overlay dump active
+    uint32_t ovl_snap_gen_ = 0xFFFFFFFF;
     uint32_t ovl_image_ = 0;                          // CRC32 of the first 2 KB at $28000 for the current overlay (Task 3)
     bool trace_audio_ = false;
     uint64_t ym_writes_ = 0;

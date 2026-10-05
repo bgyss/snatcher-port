@@ -136,6 +136,8 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     ovl_log_ = std::getenv("SCD_OVERLAYS") != nullptr;
     // The census is meaningless under SCD_LIFT_VERIFY: verify replays every translated instruction in Musashi.
     cov_on_ = std::getenv("SCD_COVERAGE") != nullptr && std::getenv("SCD_LIFT_VERIFY") == nullptr;
+    if (const char* d = std::getenv("SCD_DUMP_OVERLAYS")) ovl_dump_dir_ = d;
+    ovl_track_ = cov_on_ || !ovl_dump_dir_.empty();
 #ifdef SNATCHER_TRANSLATED
     translate_ = std::getenv("SCD_NO_TRANSLATE") == nullptr;
 #endif
@@ -348,11 +350,15 @@ void System::update_main_irq() { refresh_irq(kMain); }
 void System::update_sub_irq() { refresh_irq(kSub); }
 
 void System::trace_pc(uint32_t pc) {
-    if (cov_on_) {
+    if (ovl_track_) {
         uint32_t p = pc & 0xFFFFFF;
-        Fallback why = fallback_why_;
-        if (why == Fallback::kNotTranslated && (hle_.count(p) || hle_.count(p - 2))) why = Fallback::kHleStub;   // trap word, or the rts after it
-        cov_.note(int(cur_), cur_ == kSub && p >= 0x28000 && p < 0x80000 ? ovl_image_ : 0, why, p);
+        bool ovl = cur_ == kSub && p >= 0x28000 && p < 0x80000;
+        if (ovl) note_overlay_exec();
+        if (cov_on_) {
+            Fallback why = fallback_why_;
+            if (why == Fallback::kNotTranslated && (hle_.count(p) || hle_.count(p - 2))) why = Fallback::kHleStub;   // trap word, or the rts after it
+            cov_.note(int(cur_), ovl ? ovl_image_ : 0, why, p);
+        }
     }
     if (ovl_log_ && cur_ == kSub && pc >= 0x16700 && pc < 0x80000) ovl_hist_[(pc >> 8) << 8]++;
     if (stack_at_ && (pc & 0xFFFFFF) == stack_at_ && frames_ >= trace_from_ && stack_left_ > 0) {
@@ -400,6 +406,12 @@ void System::advance_sub_time(int cycles) {
 }
 
 
+static uint32_t crc32_of(const uint8_t* p, size_t n) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < n; ++i) { crc ^= p[i]; for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1))); }
+    return ~crc;
+}
+
 #ifdef SNATCHER_TRANSLATED
 struct MainBusAdapter;
 struct SubBusAdapter : lift::Bus {
@@ -428,12 +440,6 @@ struct MainBusAdapter : lift::Bus {
     void w8(uint32_t a, uint8_t v) override { s.main_write8(a, v); }
     void w16(uint32_t a, uint16_t v) override { s.main_write16(a, v); }
 };
-
-static uint32_t crc32_of(const uint8_t* p, size_t n) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < n; ++i) { crc ^= p[i]; for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1))); }
-    return ~crc;
-}
 
 struct TEntry {
     bool (*has)(uint32_t);
@@ -492,6 +498,7 @@ int System::run_sub_translated(int cycles) {
         uint32_t pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
         uint32_t sr = reg_get(M68K_REG_SR);
         bool irq_blocked = sub_irq_level() <= int((sr >> 8) & 7);
+        if (ovl_track_ && pc >= 0x28000 && pc < 0x80000) note_overlay_exec();   // before translated overlay code can modify its own image
         // First program whose code at pc is in memory exactly as translated (overlays are re-checked after every disc load into PRG RAM).
         TEntry* te = nullptr;
         bool claimed = false;
@@ -1406,6 +1413,22 @@ std::string System::comm_string() const {
         p += std::snprintf(p, 8, "%02x%02x ", src[0], src[1]);
     }
     return std::string(buf);
+}
+
+void System::note_overlay_exec() {
+    if (ovl_snap_gen_ == prg_ovl_gen_) return;
+    ovl_snap_gen_ = prg_ovl_gen_;
+    ovl_image_ = crc32_of(prg_ram_ + 0x28000, 0x800);
+    if (ovl_dump_dir_.empty()) return;
+    char name[32];
+    std::snprintf(name, sizeof name, "/ovl_%08x.bin", ovl_image_);
+    std::string path = ovl_dump_dir_ + name;
+    if (FILE* f = std::fopen(path.c_str(), "rb")) { std::fclose(f); return; }
+    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+        std::fwrite(prg_ram_ + 0x28000, 1, 0x80000 - 0x28000, f);
+        std::fclose(f);
+        log("[overlay] dumped %s (load generation %u, frame %llu)\n", path.c_str(), prg_ovl_gen_, (unsigned long long)frames_);
+    }
 }
 
 bool System::write_coverage(const std::string& path) {

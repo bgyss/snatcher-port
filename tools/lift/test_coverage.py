@@ -33,6 +33,24 @@ class TestInterpreterCensus(unittest.TestCase):
         self.assertEqual({x[2] for x in r}, {"interpreter"})
         self.assertEqual({x[0] for x in r}, {"main", "sub"})
 
+    def test_overlay_dump_is_keyed_by_its_first_2k(self):
+        d = OUT / "ovl"
+        d.mkdir(parents=True, exist_ok=True)
+        for p in d.glob("ovl_*.bin"):
+            p.unlink()
+        f = OUT / "ovl.tsv"
+        run(INTERP, 1500, SCD_COVERAGE=str(f), SCD_DUMP_OVERLAYS=str(d))   # the intro overlay runs after the Konami logo
+        dumps = sorted(d.glob("ovl_*.bin"))
+        self.assertTrue(dumps, "no overlay dumped")
+        for p in dumps:
+            data = p.read_bytes()
+            self.assertEqual(len(data), 0x58000)
+            self.assertEqual(p.stem, "ovl_%08x" % zlib.crc32(data[:0x800]))
+        images = {x[1] for x in rows(f) if x[0] == "sub" and int(x[3], 16) >= 0x28000}
+        self.assertTrue(images, "no census rows tagged with an overlay image")
+        self.assertLessEqual(images, {p.stem[4:] for p in dumps})
+        self.assertNotIn("00000000", images)
+
 
 @unittest.skipUnless(CUE.exists() and TRANS.exists(), "disc or translated build missing")
 class TestTranslatedCensus(unittest.TestCase):
