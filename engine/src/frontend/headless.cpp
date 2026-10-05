@@ -163,6 +163,8 @@ int main(int argc, char** argv) {
     };
 
     const int profile_from = std::getenv("SCD_PROFILE") ? std::atoi(std::getenv("SCD_PROFILE")) : -1;
+    const char* coverage_path = std::getenv("SCD_COVERAGE");   // ADR-003 fallback census, written on every exit (watchdog trips included)
+    auto write_census = [&] { if (coverage_path) sys.write_coverage(coverage_path); };
     if (const char* t = std::getenv("SCD_TRACE")) {  // cpu:frame:count
         int cpu, n; unsigned long long fr;
         if (std::sscanf(t, "%d:%llu:%d", &cpu, &fr, &n) == 3) sys.set_trace(cpu, fr, n);
@@ -201,6 +203,7 @@ int main(int argc, char** argv) {
             if (v.kind == WatchVerdict::kStillScreen) std::fprintf(stderr, "[watch] warning: screen unchanged since frame %llu\n", (unsigned long long)v.since);
             else if (v.kind != WatchVerdict::kOk) {
                 if (ckpt) { emit_ckpt(); std::fclose(ckpt); }
+                write_census();
                 write_failure_bundle(sys, out, trace, v);
                 sys.shutdown();
                 return 3;
@@ -296,6 +299,7 @@ int main(int argc, char** argv) {
         if (!rec.finish(&err)) std::fprintf(stderr, "error: %s\n", err.c_str());
     }
     std::printf("ran %llu frames%s\n", (unsigned long long)sys.frame_count(), sys.halted() ? " (halted)" : "");
+    write_census();
     sys.shutdown();
     return 0;
 }

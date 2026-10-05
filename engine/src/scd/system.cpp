@@ -134,6 +134,8 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     trace_bios_ = std::getenv("SCD_TRACE_BIOS") != nullptr;
     comm_log_ = std::getenv("SCD_COMMLOG") != nullptr;
     ovl_log_ = std::getenv("SCD_OVERLAYS") != nullptr;
+    // The census is meaningless under SCD_LIFT_VERIFY: verify replays every translated instruction in Musashi.
+    cov_on_ = std::getenv("SCD_COVERAGE") != nullptr && std::getenv("SCD_LIFT_VERIFY") == nullptr;
 #ifdef SNATCHER_TRANSLATED
     translate_ = std::getenv("SCD_NO_TRANSLATE") == nullptr;
 #endif
@@ -346,6 +348,12 @@ void System::update_main_irq() { refresh_irq(kMain); }
 void System::update_sub_irq() { refresh_irq(kSub); }
 
 void System::trace_pc(uint32_t pc) {
+    if (cov_on_) {
+        uint32_t p = pc & 0xFFFFFF;
+        Fallback why = fallback_why_;
+        if (why == Fallback::kNotTranslated && (hle_.count(p) || hle_.count(p - 2))) why = Fallback::kHleStub;   // trap word, or the rts after it
+        cov_.note(int(cur_), cur_ == kSub && p >= 0x28000 && p < 0x80000 ? ovl_image_ : 0, why, p);
+    }
     if (ovl_log_ && cur_ == kSub && pc >= 0x16700 && pc < 0x80000) ovl_hist_[(pc >> 8) << 8]++;
     if (stack_at_ && (pc & 0xFFFFFF) == stack_at_ && frames_ >= trace_from_ && stack_left_ > 0) {
         --stack_left_;
@@ -484,17 +492,22 @@ int System::run_sub_translated(int cycles) {
         uint32_t pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
         uint32_t sr = reg_get(M68K_REG_SR);
         bool irq_blocked = sub_irq_level() <= int((sr >> 8) & 7);
+        // First program whose code at pc is in memory exactly as translated (overlays are re-checked after every disc load into PRG RAM).
         TEntry* te = nullptr;
+        bool claimed = false;
         if (irq_blocked) {
-            for (auto& e : sub_entries()) if (e.has(pc)) { te = &e; break; }
+            for (auto& e : sub_entries()) {
+                if (!e.has(pc)) continue;
+                claimed = true;
+                if (entry_code_ok(e, prg_ram_, pc, e.overlay ? prg_ovl_gen_ : 0)) { te = &e; break; }
+            }
         }
+        fallback_why_ = !irq_blocked ? Fallback::kIrqEntry : claimed ? Fallback::kCodeMismatch : Fallback::kNotTranslated;
         if (te) {
             for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
             c.set_ccr(sr & 0x1F);
             c.sr_sys = uint16_t(sr & 0xA700);
-            // The code bytes in memory must be the ones that were translated (overlays are re-checked after every disc load into PRG RAM).
-            bool ok = entry_code_ok(*te, prg_ram_, pc, te->overlay ? prg_ovl_gen_ : 0);
-            if (ok) {
+            {
                 int32_t before = budget;
                 lift::Cpu saved = c;
                 uint32_t spc = pc;
@@ -531,7 +544,8 @@ int System::run_sub_translated(int cycles) {
                 reg_set(M68K_REG_PC, ex.pc);
                 exit_ring_[exit_pos_++ & 15] = uint32_t(ex.kind) << 28 | (ex.pc & 0xFFFFFF);
                 if (ex.kind == lift::Exit::Budget) break;
-                if (ex.pc != pc || ex.kind != lift::Exit::NotTranslated) { /* fall through to a fallback step at ex.pc */ }
+                if (ex.kind == lift::Exit::NotTranslated) continue;   // re-dispatch: ex.pc may belong to another program, else the interpreter runs it
+                fallback_why_ = Fallback::kUnsupported;               // Unsupported / Trap / DivZero: Musashi executes the instruction at ex.pc
             }
         }
         // Interpreter step (also services pending interrupts).
@@ -575,7 +589,13 @@ int System::run_main_translated(int cycles) {
                 reg_set(M68K_REG_PC, ex.pc);
                 if (ex.kind == lift::Exit::Budget) break;
                 if (halted_) break;
+                if (ex.kind == lift::Exit::NotTranslated) continue;
+                fallback_why_ = Fallback::kUnsupported;
+            } else {
+                fallback_why_ = Fallback::kCodeMismatch;
             }
+        } else {
+            fallback_why_ = !irq_blocked ? Fallback::kIrqEntry : Fallback::kNotTranslated;
         }
         ++fallback_steps_;
         int used = m68k_execute(1);
@@ -598,6 +618,7 @@ void System::run_cpu(Cpu c, int cycles) {
     select_cpu(c);
     refresh_irq(c);
     int used;
+    fallback_why_ = translate_ ? Fallback::kNotTranslated : Fallback::kInterpreter;   // whole-slice Musashi runs (no translated program for this CPU)
 #ifdef SNATCHER_TRANSLATED
 #ifdef SNATCHER_TRANSLATED_MAIN
     if (c == kMain && translate_) used = run_main_translated(budget); else
@@ -1385,6 +1406,21 @@ std::string System::comm_string() const {
         p += std::snprintf(p, 8, "%02x%02x ", src[0], src[1]);
     }
     return std::string(buf);
+}
+
+bool System::write_coverage(const std::string& path) {
+    if (!cov_on_) { log("[coverage] census disabled: SCD_LIFT_VERIFY replays translated code in Musashi\n"); return false; }
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) { log("[coverage] cannot write %s\n", path.c_str()); return false; }
+    std::string s = cov_.to_tsv(frames_, translate_);
+    std::fwrite(s.data(), 1, s.size(), f);
+    std::fclose(f);
+    log("[coverage] %s: not_translated %llu steps/%zu pcs, code_mismatch %llu, irq_entry %llu, hle_stub %llu, unsupported %llu, interpreter %llu\n",
+        path.c_str(), (unsigned long long)cov_.steps(Fallback::kNotTranslated), cov_.distinct_pcs(Fallback::kNotTranslated),
+        (unsigned long long)cov_.steps(Fallback::kCodeMismatch), (unsigned long long)cov_.steps(Fallback::kIrqEntry),
+        (unsigned long long)cov_.steps(Fallback::kHleStub), (unsigned long long)cov_.steps(Fallback::kUnsupported),
+        (unsigned long long)cov_.steps(Fallback::kInterpreter));
+    return true;
 }
 
 void System::dump_overlay_hist() {

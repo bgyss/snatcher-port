@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "disc.h"
+#include "coverage.h"
 #include "pcm.h"
 #include "psg.h"
 #include "replay.h"
@@ -90,6 +91,8 @@ public:
     void enable_profile(bool on) { profile_ = on; pc_hist_[0].clear(); pc_hist_[1].clear(); }
     void dump_profile(int top);
     void dump_overlay_hist();
+    // SCD_COVERAGE census (ADR-003): writes the TSV, false when the census is off (SCD_LIFT_VERIFY) or the file cannot be written.
+    bool write_coverage(const std::string& path);
     // Per-instruction trace of one CPU (0 = Main, 1 = Sub) starting at a frame.
     void set_trace(int cpu, uint64_t from_frame, int count) { trace_cpu_ = cpu; trace_from_ = from_frame; trace_left_ = count; }
     void set_trace_from(uint64_t f) { trace_from_ = f; }
@@ -269,6 +272,10 @@ private:
     bool ovl_log_ = false;
     uint32_t cur_load_lba_ = 0;
     std::map<uint32_t, uint64_t> ovl_hist_;
+    Coverage cov_;
+    bool cov_on_ = false;
+    Fallback fallback_why_ = Fallback::kInterpreter;   // cause of the Musashi steps about to run (read by trace_pc)
+    uint32_t ovl_image_ = 0;                          // CRC32 of the first 2 KB at $28000 for the current overlay (Task 3)
     bool trace_audio_ = false;
     uint64_t ym_writes_ = 0;
     uint32_t watch_ = 0, stack_at_ = 0;
