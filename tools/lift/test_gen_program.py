@@ -1,5 +1,5 @@
 """Tests for gen_program.py seeds, region windows, mainram and overlay programs (synthetic code, no disc needed)."""
-import pathlib, subprocess, sys, tempfile, unittest
+import pathlib, shutil, subprocess, sys, tempfile, unittest
 
 GEN = pathlib.Path(__file__).with_name("gen_program.py")
 MOVEQ1_RTS = bytes.fromhex("70014E75")
@@ -95,6 +95,99 @@ class TestOverlays(Base):
     def test_index_without_overlays(self):
         self.gen("ovl_index")
         self.assertIn("kOverlayCount = 0;", (self.out / "overlays_index.cpp").read_text())
+
+
+HARNESS = r"""
+#include <cstdio>
+#include "cpu68k.h"
+extern "C" { unsigned char m68ki_cycles[3][0x10000]; }
+namespace lift { Exit PROG_run(Cpu& c, uint32_t pc, int32_t& budget); }
+struct Mem : lift::Bus {
+    uint8_t m[0x1000000] = {};
+    uint8_t r8(uint32_t a) override { return m[a & 0xFFFFFF]; }
+    uint16_t r16(uint32_t a) override { return uint16_t(m[a & 0xFFFFFF] << 8 | m[(a + 1) & 0xFFFFFF]); }
+    void w8(uint32_t a, uint8_t v) override { m[a & 0xFFFFFF] = v; }
+    void w16(uint32_t a, uint16_t v) override { w8(a, uint8_t(v >> 8)); w8(a + 1, uint8_t(v)); }
+};
+static Mem mem;
+int main() {
+    for (auto& r : m68ki_cycles) for (auto& v : r) v = 4;
+    lift::Cpu c; c.bus = &mem; c.a[7] = 0x1000; mem.w32(0x1000, 0x123456);
+    int32_t budget = 1000;
+    lift::Exit ex = PROG_run(c, ENTRY, budget);
+    std::printf("%d %06x %08x\n", int(ex.kind), unsigned(ex.pc), unsigned(c.d[0]));
+}
+"""
+
+
+class TestRangeExit(Base):
+    """A transfer from one translated code range to another must leave an overlay program's _run (NotTranslated) so the
+    dispatcher re-checks the target range's bytes (pick_entry): otherwise a branch can run stale code over a different
+    overlay that shares the entry range. Sub/Main programs (not overlay-mutable) keep running across ranges."""
+    ROOT = pathlib.Path(__file__).resolve().parents[2]
+    # $28000: moveq #1,d0 ; bra.s $28010   |   $28010: moveq #2,d0 ; rts   (two code ranges; the gap is illegal
+    # opcodes so ovl909's linear scan does not decode it)
+    IMG = bytes.fromhex("7001600C") + bytes.fromhex("4AFC") * 6 + bytes.fromhex("70024E75")
+
+    def run_prog(self, cpp_name, prog, entry):
+        exe = self.out / "h"
+        src = self.out / "h.cpp"
+        src.write_text(HARNESS.replace("PROG", prog).replace("ENTRY", hex(entry)))
+        cxx = shutil.which("clang++") or "/usr/bin/clang++"
+        r = subprocess.run([cxx, "-std=c++20", "-O0", "-I", str(self.ROOT / "engine/src/lift"), str(src), str(self.out / cpp_name), "-o", str(exe)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        kind, pc, d0 = subprocess.run([str(exe)], capture_output=True, text=True, check=True).stdout.split()
+        return int(kind), int(pc, 16), int(d0, 16)
+
+    def test_overlay_exits_when_leaving_range(self):
+        d = self.code / "overlays"
+        d.mkdir()
+        (d / "ovl_0000abcd.bin").write_bytes(self.IMG + bytes(0x100))
+        self.seeds("ovl_0000abcd", 0x28000)
+        self.gen("ovl:overlays/ovl_0000abcd.bin")
+        cpp = (self.out / "ovl_0000abcd_translated.cpp").read_text()
+        self.assertIn("{0x28000, 0x28004,", cpp)
+        self.assertIn("{0x28010, 0x28014,", cpp)
+        kind, pc, d0 = self.run_prog("ovl_0000abcd_translated.cpp", "ovl_0000abcd", 0x28000)
+        self.assertEqual((kind, pc, d0), (5, 0x28010, 1))   # NotTranslated at the second range, before running it
+        kind, pc, d0 = self.run_prog("ovl_0000abcd_translated.cpp", "ovl_0000abcd", 0x28010)
+        self.assertEqual((kind, pc, d0), (5, 0x123456, 2))  # rts out of the program
+
+    def test_overlapping_decodes_share_one_range(self):
+        # $28000: move.w #$7001,d0 ; rts  and, seeded mid-instruction, $28002: moveq #1,d0 ; rts
+        d = self.code / "overlays"
+        d.mkdir()
+        (d / "ovl_0000beef.bin").write_bytes(bytes.fromhex("303C70014E75") + bytes(0x100))
+        self.seeds("ovl_0000beef", 0x28000, 0x28002)
+        self.gen("ovl:overlays/ovl_0000beef.bin")
+        cpp = (self.out / "ovl_0000beef_translated.cpp").read_text()
+        self.assertIn("{0x28000, 0x28006,", cpp)
+        self.assertIn("kOvl_0000beefRangeCount = 1;", cpp)
+
+    def test_ovl909_exits_when_leaving_range(self):
+        (self.code / "ovl_909.bin").write_bytes(self.IMG + bytes(0x100))
+        self.seeds("ovl909", 0x28000)
+        self.gen("ovl909")
+        kind, pc, d0 = self.run_prog("ovl909_translated.cpp", "ovl909", 0x28000)
+        self.assertEqual((kind, pc, d0), (5, 0x28010, 1))
+
+    def test_mainram_exits_when_leaving_range(self):
+        sp = bytearray(0x1800)
+        sp[0x1300:0x1300 + len(self.IMG)] = self.IMG
+        (self.code / "scd_sub_sp.bin").write_bytes(bytes(sp))
+        self.gen("mainram")
+        kind, pc, d0 = self.run_prog("mainram_translated.cpp", "mainram", 0xFFE100)
+        self.assertEqual((kind, pc, d0), (5, 0xFFE110, 1))
+
+    def test_sub_runs_across_ranges(self):
+        sp = bytearray(0x200)
+        sp[0x2A:0x2A + len(self.IMG)] = self.IMG     # entry $602A
+        (self.code / "scd_sub_sp.bin").write_bytes(bytes(sp))
+        (self.code / "scd_subcode.bin").write_bytes(bytes(0x100))
+        self.gen("sub")
+        kind, pc, d0 = self.run_prog("sub_translated.cpp", "sub", 0x602A)
+        self.assertEqual((kind, pc, d0), (5, 0x123456, 2))
 
 
 if __name__ == "__main__":

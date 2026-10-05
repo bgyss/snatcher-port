@@ -744,7 +744,9 @@ void System::main_write8(uint32_t a, uint32_t v) {
     }
     if (a >= 0xE00000) {
         main_ram_[a & 0xFFFF] = uint8_t(v);
-        if ((a & 0xFFFF) - 0xE100u < 0x2D0u) ++main_code_gen_;   // the $FFE100 code (mainram program) changed: re-check its CRC ranges
+        // The $FFE100 code (mainram program) changed: re-check its CRC ranges. The window $FFE100..$FFE3D0 is also
+        // hard-coded in tools/lift/gen_program.py (PROGRAMS['mainram']) and tools/lift/coverage_report.py (MAINRAM).
+        if ((a & 0xFFFF) - 0xE100u < 0x2D0u) ++main_code_gen_;
     }
 }
 
@@ -1402,6 +1404,8 @@ void System::note_overlay_exec() {
         std::fwrite(prg_ram_ + 0x28000, 1, 0x80000 - 0x28000, f);
         std::fclose(f);
         log("[overlay] dumped %s (load generation %u, frame %llu)\n", path.c_str(), prg_ovl_gen_, (unsigned long long)frames_);
+    } else {
+        log("[overlay] cannot write %s\n", path.c_str());
     }
 }
 

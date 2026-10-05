@@ -6,10 +6,12 @@
 *.cue
 *.chd
 sega-cd-eng/
+/sega-cd-eng
 pcengine-cd-jpn/
 
 # Extracted / decompiled game data stays local (see docs/STRATEGY.md "Legal guardrails").
 extracted/
+/extracted
 work/
 ghidra/*.gpr
 ghidra/*.rep/

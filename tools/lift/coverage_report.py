@@ -6,7 +6,9 @@ import argparse, collections, os, sys
 
 GATE_REASONS = ('not_translated', 'code_mismatch')
 SEED_REASONS = ('interpreter', 'not_translated')
-MAINRAM = (0xFFE100, 0xFFE3D0)   # SP $7300..$75CF, copied by the Main CPU to $FFE100 (JOURNAL)
+# SP $7300..$75CF, copied by the Main CPU to $FFE100 (JOURNAL). Also hard-coded in tools/lift/gen_program.py
+# (PROGRAMS['mainram']) and engine/src/scd/system.cpp (main_write8, main_code_gen_): keep the three in step.
+MAINRAM = (0xFFE100, 0xFFE3D0)
 
 
 def read_census(path):

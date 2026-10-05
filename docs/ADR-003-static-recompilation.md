@@ -75,7 +75,7 @@ the options and sound test. The future autonomous explorer (`docs/PLAYTEST.md`, 
 
 ## Progress
 
-M1, 2026-10-05. Replay set: `tools/playtest/replays/intro_skip.replay` only (60000 frames, reaches the first in-game screen). Gate passes on intro_skip for disc code only; M1 is not complete until the replays for every act, a shooting section, save/load and options/sound test exist and `mise run coverage` passes over all of them.
+M1, 2026-10-05. Replay set: `tools/playtest/replays/intro_skip.replay` only (60000 frames, reaches the first in-game screen). On intro_skip, `--check` still fails only on 8 host-built BIOS glue PCs, with no disc-code gate failures. M1 is not complete until the replays for every act, a shooting section, save/load and options/sound test exist and `mise run coverage` passes over all of them.
 
 | intro_skip, translated build | not_translated | code_mismatch | irq_entry | hle_stub | unsupported |
 |---|---|---|---|---|---|
@@ -84,4 +84,5 @@ M1, 2026-10-05. Replay set: `tools/playtest/replays/intro_skip.replay` only (600
 
 - Overlay images seen: `ovl_936869c7` (the `ovl_909.bin` dump), `ovl_a7b6f72d`. Both are translated from their census dumps. The 2 code_mismatch PCs before seeds were the ovl_909 program claiming PCs inside `ovl_a7b6f72d`.
 - `mainram` (`$FFE100..$FFE3D0`): no interpreter steps after seeding (`$FFE106` was the one not_translated PC), no code_mismatch on Main.
+- Overlay programs (`ovl909`, the census overlays, `mainram`) leave their `_run` with `NotTranslated` whenever the next PC is outside the code range being executed, so the dispatcher re-checks the target range's CRC (`pick_entry`). Before, only the entry PC's range was checked, and a branch inside `ovl909` could run its translation over `ovl_a7b6f72d` bytes that differ (`$029412`, `$02941C`). Their ranges are also merged where decodes overlap, so ranges are disjoint. `sub` and `main` output is unchanged. Bit-identical to the parent translated build on intro_skip (60000 frames, `--strict-ram`), same census, no measurable cost.
 - The 8 remaining PCs are host-built BIOS glue at addresses no program covers (`unmapped:sub` 7: `$180..$18E` level-2 wrapper, `$5F7C` jump slot, `$200`/`$206` boot stub; `unmapped:main` 1: `$FFFDAE` jump slot to the `_BURAM` trap). `coverage --check` fails on them until they are either reported as `hle_stub` or translated (open decision).

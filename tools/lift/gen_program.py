@@ -2,17 +2,22 @@
 """Generate the translated Sub-CPU program (SP + SUBCODE) as C++ from the user's disc blobs.
 Usage: tools/lift/gen_program.py <outdir> [code dir default extracted/code] [sub|main|mainram|ovl909|ovl:<file under code dir>|ovl_index]
 Writes <outdir>/<program>_translated.cpp. Output is disc-derived: never commit or distribute it."""
-import glob, os, sys, zlib, re
+import bisect, glob, os, sys, zlib, re
 sys.path.insert(0, os.path.dirname(__file__))
 from m68k_decode import decode, hx
 from emit import flow_code
 
 PROGRAMS = {
-    'ovl909': dict(regions=[('ovl_909.bin', 0x28000)], entries=[], vectors=False, mask=0xFFFFFF, lo_code=0x28000, scan=(0x28000, 0x2C000)),
+    # range_exit: overlay-mutable code (PRG RAM overlays, the $FFE100 window). The runtime checks only the code range of
+    # the PC it dispatches to (translate_entry.h pick_entry), so a transfer to another range must leave _run and be
+    # re-dispatched: another overlay may share this range's bytes but not the target's (ADR-003).
+    'ovl909': dict(regions=[('ovl_909.bin', 0x28000)], entries=[], vectors=False, mask=0xFFFFFF, lo_code=0x28000, scan=(0x28000, 0x2C000), range_exit=True),
     'sub': dict(regions=[('scd_sub_sp.bin', 0x6000), ('scd_subcode.bin', 0xD400)],
                 entries=[0x602A, 0x602E, 0x60A8, 0x60BE, 0x629C], vectors=True, mask=0xFFFFFF, lo_code=0x6000),
     # SP $7300..$75CF, copied by the Main CPU to $FFE100 and run there (BURAM wrapper etc., JOURNAL). Region = (file, base, offset, length).
-    'mainram': dict(regions=[('scd_sub_sp.bin', 0xFFE100, 0x1300, 0x2D0)], entries=[0xFFE100], vectors=False, mask=0xFFFFFF, lo_code=0xFFE100),
+    # The window $FFE100..$FFE3D0 is also hard-coded in engine/src/scd/system.cpp (main_write8 bumps main_code_gen_) and
+    # tools/lift/coverage_report.py (MAINRAM): keep the three in step.
+    'mainram': dict(regions=[('scd_sub_sp.bin', 0xFFE100, 0x1300, 0x2D0)], entries=[0xFFE100], vectors=False, mask=0xFFFFFF, lo_code=0xFFE100, range_exit=True),
     'main': dict(regions=[('scd_main_ip.bin', 0xFF0000)],
                  entries=[0xFF0000, 0xFF0584, 0xFF06C8, 0xFF08E2], vectors=False, mask=0xFFFFFF, lo_code=0xFF0000),
 }
@@ -62,7 +67,7 @@ def main():
     if prog.startswith('ovl:'):   # an overlay dump (SCD_DUMP_OVERLAYS); entry points come from its seed file
         rel = prog[4:]
         prog = os.path.splitext(os.path.basename(rel))[0]
-        cfg = dict(regions=[(rel, 0x28000)], entries=[], vectors=False, mask=0xFFFFFF, lo_code=0x28000)
+        cfg = dict(regions=[(rel, 0x28000)], entries=[], vectors=False, mask=0xFFFFFF, lo_code=0x28000, range_exit=True)
     else:
         cfg = PROGRAMS[prog]
     REGIONS, EXTRA_ENTRIES = cfg['regions'], cfg['entries']
@@ -188,10 +193,14 @@ def main():
     for pc in order: out.append('        case 0x%X:' % pc)
     out.append('            return true;\n        default: return false;\n    }\n}\n')
     # merged instruction byte ranges: the runtime checks that these bytes in memory are what was translated
+    # Overlay programs (range_exit) get disjoint ranges, so the one range the runtime checks for a PC holds every byte
+    # of the instructions starting in it, and generated code may stay in _run only while the next PC is in that range.
+    range_exit = cfg.get('range_exit', False)
     rngs = []
     for pc in order:
         a, b = pc, pc + insns[pc].size
         if rngs and rngs[-1][1] == a: rngs[-1][1] = b
+        elif rngs and range_exit and rngs[-1][1] > a: rngs[-1][1] = max(rngs[-1][1], b)   # overlapping decodes: one range
         else: rngs.append([a, b])
     crcdata = b''.join(bytes(mem.get(x, 0) for x in range(a, b)) for a, b in rngs)
     out.append('extern const Span k%sRanges[] = {' % prog.capitalize())
@@ -200,6 +209,7 @@ def main():
     out.append('extern const Span k%sSpans[] = {' % prog.capitalize())
     for lo, hi, crc, f in spans: out.append('    {0x%X, 0x%X, 0x%08X},  // %s' % (lo, hi, crc, f))
     out.append('};\nextern const int k%sSpanCount = %d;\n' % (prog.capitalize(), len(spans)))
+    rng_lo = [a for a, _ in rngs]
     out.append('Exit %s_run(Cpu& c, uint32_t pc, int32_t& budget) {' % prog + '\n    uint32_t npc = 0, tgt = 0; (void)tgt;\n    for (;;) {\n        if (budget <= 0) return Exit{pc, Exit::Budget};\n        switch (pc) {')
     for i, pc in enumerate(order):
         ins = insns[pc]
@@ -214,7 +224,11 @@ def main():
             out.append('            if (budget <= 0) return Exit{0x%X, Exit::Budget};' % nxt)
             out.append('        } // fall through\n        [[fallthrough]];')
             continue
-        out.append('            pc = npc & 0xFFFFFF; continue;\n        }')
+        if range_exit:
+            lo, hi = rngs[bisect.bisect_right(rng_lo, pc) - 1]
+            out.append('            pc = npc & 0xFFFFFF; if (pc - 0x%Xu >= 0x%Xu) return Exit{pc, Exit::NotTranslated}; continue;\n        }' % (lo, hi - lo))
+        else:
+            out.append('            pc = npc & 0xFFFFFF; continue;\n        }')
     out.append('        default: return Exit{pc, Exit::NotTranslated};\n        }\n    }\n}\n}  // namespace lift')
     open(os.path.join(outdir, '%s_translated.cpp' % prog), 'w').write('\n'.join(out) + '\n')
     print('translated %d instructions (%d entry points)' % (len(order), len(entries)))
