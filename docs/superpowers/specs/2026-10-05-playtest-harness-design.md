@@ -16,7 +16,7 @@ Out of scope: MAME comparison, audio checks.
 
 ## Architecture
 
-1. **Deterministic input recorder.** The app (`--record-input FILE`) and headless record pad input keyed by game frame (`$E020`), not host frame. Headless gains `--replay FILE`.
+1. **Deterministic input recorder.** The app (`--record-input FILE`) and headless record pad input keyed by boot frame count (`System::frame_count()`, the numbering `--press` and the debug log use), recorded once per emulated frame inside `run_frame()` (the app may run several frames per input poll). Headless gains `--replay FILE`.
 2. **Watchdog** (`scd_headless --watch`): hang (`$E020` unchanged for N frames, or both CPUs looping on the same PCs), crash (illegal opcode other than the BIOS stub traps, address error, exception vectors), black/frozen screen (framebuffer hash unchanged while the game claims progress). On trigger it writes a failure bundle.
 3. **Checkpoints.** Hashes recorded when game state (`$E022`/`$E06C`) changes, plus every N frames. Comparing two runs of one replay reports the first differing checkpoint and which hash differed.
 4. **Explorer** (phase 2).
@@ -36,7 +36,7 @@ justifier off
 @0x0127 -
 ```
 
-The loader refuses a replay whose disc hash does not match. Frames before the first `$E020 >= 1` count from boot frame, as `--press` does. A `--log` session converts only approximately (host-frame stamps), hence the native recorder.
+The loader refuses a replay whose disc hash does not match. Frames are boot frames, as `--press` uses; `$E020` is not the key because it is 0 before the game starts and not guaranteed monotonic across scenes. The header also records the SHA-1 of the starting backup RAM (the live app loads `bram.bin`, headless starts empty); headless refuses a replay when it differs. A `--log` session converts only approximately (host-frame stamps), hence the native recorder.
 
 `*.ckpt`:
 
