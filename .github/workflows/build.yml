@@ -1,51 +1,77 @@
 name: build
+# Interpreter-only player packages for macOS, Windows and Linux. No disc or extracted game code is available in CI,
+# so nothing built here contains translated (disc-derived) code; tools/package/ci_package.sh also refuses if it does.
+# release.yml reuses this workflow for tagged releases.
 on:
   push:
+    branches: ['**']   # tag pushes are handled by release.yml
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
 jobs:
-  build:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            name: macos-arm64
-          - os: windows-latest
-            name: windows-x64
-    runs-on: ${{ matrix.os }}
+          - { name: macos,   os: macos-latest }
+          - { name: windows, os: windows-latest }
+          - { name: linux,   os: ubuntu-22.04 }   # oldest LTS runner: the binary needs glibc 2.35+
     steps:
       - uses: actions/checkout@v4
-      - name: Install SDL3 (macOS)
-        if: runner.os == 'macOS'
-        run: brew install sdl3
-      - name: Fetch SDL3 (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+
+      - name: Install build dependencies (Linux)
+        if: matrix.name == 'linux'
         run: |
-          $v = "3.2.16"
-          Invoke-WebRequest "https://github.com/libsdl-org/SDL/releases/download/release-$v/SDL3-devel-$v-VC.zip" -OutFile sdl.zip
-          Expand-Archive sdl.zip -DestinationPath sdl
-          echo "SDL3_DIR=$PWD/sdl/SDL3-$v/cmake" >> $env:GITHUB_ENV
-          echo "SDL3_BIN=$PWD/sdl/SDL3-$v/lib/x64" >> $env:GITHUB_ENV
-      - name: Configure
-        run: cmake -S engine -B build -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        run: cmake --build build --config Release
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config python3 \
+            libasound2-dev libpulse-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+            libxfixes-dev libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libdrm-dev libgbm-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libudev-dev libdbus-1-dev
+
+      - name: Set up MSYS2 MinGW-w64 (Windows)
+        if: matrix.name == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            git
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-python
+
       - name: Package (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          mkdir dist && cp build/snatcher dist/ && cp build/scd_headless dist/
-          tar -czf snatcher-${{ matrix.name }}.tar.gz -C dist .
+        if: matrix.name == 'macos'
+        run: tools/package/ci_package.sh mac
+
+      - name: Package (Linux)
+        if: matrix.name == 'linux'
+        run: tools/package/ci_package.sh linux
+
       - name: Package (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.name == 'windows'
+        shell: msys2 {0}
+        env:
+          PYTHON: python
+        run: tools/package/ci_package.sh windows
+
+      - name: Zip (Windows)
+        if: matrix.name == 'windows'
         shell: pwsh
-        run: |
-          mkdir dist
-          Copy-Item build/Release/snatcher.exe dist/
-          Copy-Item build/Release/scd_headless.exe dist/
-          Copy-Item "$env:SDL3_BIN/SDL3.dll" dist/
-          Compress-Archive dist/* snatcher-${{ matrix.name }}.zip
+        run: Compress-Archive -Path dist/ci/Snatcher-windows-x64 -DestinationPath dist/ci/Snatcher-windows-x64.zip
+
       - uses: actions/upload-artifact@v4
         with:
           name: snatcher-${{ matrix.name }}
-          path: snatcher-${{ matrix.name }}.*
+          path: |
+            dist/ci/Snatcher-mac.zip
+            dist/ci/Snatcher-windows-x64.zip
+            dist/ci/Snatcher-linux-x86_64.tar.gz
+          if-no-files-found: error

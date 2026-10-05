@@ -1,7 +1,8 @@
 # Playing the port
 
 How to build, run and share the playable Mac build. (Windows: `mise run package:windows` builds
-`dist/windows/snatcher.exe`; the controls and options below are the same.)
+`dist/windows/snatcher.exe`; the controls and options below are the same.) Players who just want to play can download
+the macOS, Windows or Linux package from the GitHub Releases page; `docs/RELEASING.md` explains how those are built.
 
 ## You need
 
