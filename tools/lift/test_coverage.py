@@ -62,6 +62,17 @@ class TestTranslatedCensus(unittest.TestCase):
         self.assertNotIn("interpreter", reasons)
         self.assertIn("irq_entry", reasons)
 
+    def test_main_ram_code_is_translated(self):
+        # The SP routine the Main CPU copies to $FFE100 runs through the mainram program (Task 6, ADR-003):
+        # $FFE140 runs every frame from about frame 1020, and nothing on Main fails its per-range CRC check.
+        f = OUT / "tr_main.tsv"
+        run(TRANS, 1100, SCD_COVERAGE=str(f))
+        main = [x for x in rows(f) if x[0] == "main"]
+        window = {int(x[3], 16): x[2] for x in main if 0xFFE100 <= int(x[3], 16) < 0xFFE3D0}
+        self.assertIn(0xFFE106, window, "the $FFE100 code did not run")   # not reached by the mainram program's recursive descent
+        self.assertNotIn(0xFFE140, window)
+        self.assertNotIn("code_mismatch", {x[2] for x in main})
+
     def test_lift_verify_disables_census(self):
         f = OUT / "verify.tsv"
         f.unlink(missing_ok=True)

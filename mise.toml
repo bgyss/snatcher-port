@@ -81,8 +81,9 @@ run = "python tools/playtest/run.py {{arg(name='replay')}} --headless ${PLAYTEST
 description = "ADR-003 tests: coverage census, coverage report, translator seeds and overlays"
 run = [
   "cmake -S engine -B engine/build-interp -DCMAKE_BUILD_TYPE=Release",
-  "cmake --build engine/build-interp -j --target scd_headless coverage_test",
+  "cmake --build engine/build-interp -j --target scd_headless coverage_test translate_entry_test",
   "engine/build-interp/coverage_test",
+  "engine/build-interp/translate_entry_test",
   "python tools/lift/test_coverage_report.py",
   "python tools/lift/test_gen_program.py",
   "SCD_HEADLESS_INTERP=engine/build-interp/scd_headless python tools/lift/test_coverage.py",

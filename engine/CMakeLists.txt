@@ -44,24 +44,32 @@ target_include_directories(scdcore PUBLIC src/scd src/lift)
 if(SNATCHER_TRANSLATE_DIR)
   find_package(Python3 REQUIRED)
   set(GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
-  add_custom_command(OUTPUT ${GEN_DIR}/sub_translated.cpp
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${GEN_DIR} ${SNATCHER_TRANSLATE_DIR} sub
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/m68k_decode.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/emit.py)
-  add_custom_command(OUTPUT ${GEN_DIR}/main_translated.cpp
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${GEN_DIR} ${SNATCHER_TRANSLATE_DIR} main
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/m68k_decode.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/emit.py)
-  target_sources(scdcore PRIVATE ${GEN_DIR}/sub_translated.cpp)
+  set(LIFT ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift)
+  # Seed files and overlay dumps come from `mise run census` (ADR-003); new files are picked up on the next build.
+  file(GLOB LIFT_SEEDS CONFIGURE_DEPENDS ${SNATCHER_TRANSLATE_DIR}/seeds/*.txt)
+  file(GLOB LIFT_OVERLAYS CONFIGURE_DEPENDS ${SNATCHER_TRANSLATE_DIR}/overlays/ovl_*.bin)
+  set(LIFT_DEPS ${LIFT}/gen_program.py ${LIFT}/m68k_decode.py ${LIFT}/emit.py ${LIFT_SEEDS})
+  function(lift_program prog out)
+    add_custom_command(OUTPUT ${GEN_DIR}/${out}
+      COMMAND ${Python3_EXECUTABLE} ${LIFT}/gen_program.py ${GEN_DIR} ${SNATCHER_TRANSLATE_DIR} ${prog}
+      DEPENDS ${LIFT_DEPS} ${ARGN})
+    target_sources(scdcore PRIVATE ${GEN_DIR}/${out})
+  endfunction()
+  lift_program(sub sub_translated.cpp)
   if(EXISTS ${SNATCHER_TRANSLATE_DIR}/ovl_909.bin)
-    add_custom_command(OUTPUT ${GEN_DIR}/ovl909_translated.cpp
-      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${GEN_DIR} ${SNATCHER_TRANSLATE_DIR} ovl909
-      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/m68k_decode.py ${SNATCHER_TRANSLATE_DIR}/ovl_909.bin)
-    target_sources(scdcore PRIVATE ${GEN_DIR}/ovl909_translated.cpp)
+    lift_program(ovl909 ovl909_translated.cpp ${SNATCHER_TRANSLATE_DIR}/ovl_909.bin)
     target_compile_definitions(scdcore PUBLIC SNATCHER_TRANSLATED_OVL909=1)
   endif()
   if(EXISTS ${SNATCHER_TRANSLATE_DIR}/scd_main_ip.bin)
-    target_sources(scdcore PRIVATE ${GEN_DIR}/main_translated.cpp)
+    lift_program(main main_translated.cpp)
+    lift_program(mainram mainram_translated.cpp)
     target_compile_definitions(scdcore PUBLIC SNATCHER_TRANSLATED_MAIN=1)
   endif()
+  foreach(bin ${LIFT_OVERLAYS})
+    get_filename_component(stem ${bin} NAME_WE)
+    lift_program(ovl:overlays/${stem}.bin ${stem}_translated.cpp ${bin})
+  endforeach()
+  lift_program(ovl_index overlays_index.cpp ${LIFT_OVERLAYS})
   target_compile_definitions(scdcore PUBLIC SNATCHER_TRANSLATED=1)
 endif()
 target_link_libraries(scdcore PUBLIC musashi nuked_opn2)
@@ -78,6 +86,9 @@ target_include_directories(watchdog_test PRIVATE src/scd)
 
 add_executable(coverage_test tests/coverage_test.cpp)
 target_include_directories(coverage_test PRIVATE src/scd)
+
+add_executable(translate_entry_test tests/translate_entry_test.cpp)
+target_include_directories(translate_entry_test PRIVATE src/scd src/lift)
 
 # ---- SDL3 front-end
 if(NOT SNATCHER_FETCH_SDL)

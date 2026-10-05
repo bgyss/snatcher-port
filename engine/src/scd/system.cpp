@@ -12,11 +12,10 @@ extern "C" {
 }
 #ifdef SNATCHER_TRANSLATED
 #include "cpu68k.h"
+#include "translate_entry.h"
 namespace lift {
 bool sub_has(uint32_t pc);
 Exit sub_run(Cpu& c, uint32_t pc, int32_t& budget);
-extern const Span kSubSpans[];
-extern const int kSubSpanCount;
 #ifdef SNATCHER_TRANSLATED_OVL909
 bool ovl909_has(uint32_t pc);
 Exit ovl909_run(Cpu& c, uint32_t pc, int32_t& budget);
@@ -30,9 +29,17 @@ extern const uint32_t kSubCrc;
 #ifdef SNATCHER_TRANSLATED_MAIN
 bool main_has(uint32_t pc);
 Exit main_run(Cpu& c, uint32_t pc, int32_t& budget);
-extern const Span kMainSpans[];
-extern const int kMainSpanCount;
+extern const Span kMainRanges[];
+extern const int kMainRangeCount;
+extern const uint32_t kMainCrc;
+bool mainram_has(uint32_t pc);
+Exit mainram_run(Cpu& c, uint32_t pc, int32_t& budget);
+extern const Span kMainramRanges[];
+extern const int kMainramRangeCount;
+extern const uint32_t kMainramCrc;
 #endif
+extern const Program kOverlays[];
+extern const int kOverlayCount;
 }  // namespace lift
 #endif
 
@@ -441,48 +448,21 @@ struct MainBusAdapter : lift::Bus {
     void w16(uint32_t a, uint16_t v) override { s.main_write16(a, v); }
 };
 
-struct TEntry {
-    bool (*has)(uint32_t);
-    lift::Exit (*run)(lift::Cpu&, uint32_t, int32_t&);
-    const lift::Span* ranges;
-    int nranges;
-    uint32_t crc;
-    bool overlay;
-    uint32_t checked_gen = 0xFFFFFFFF;
-    std::vector<uint8_t> state;   // per range: 0 unchecked, 1 ok, 2 differs
-    int last = 0;
-};
-
-static uint32_t crc_range(const uint8_t* mem, uint32_t lo, uint32_t hi) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (uint32_t a = lo; a < hi; ++a) {
-        crc ^= mem[a];
-        for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1)));
-    }
-    return ~crc;
-}
-
-// True when the code range containing pc is in memory exactly as translated (checked once per range, overlays again after each disc load).
-static bool entry_code_ok(TEntry& e, const uint8_t* mem, uint32_t pc, uint32_t gen) {
-    if (e.checked_gen != gen) { e.checked_gen = gen; e.state.assign(size_t(e.nranges), 0); }
-    if (!(pc >= e.ranges[e.last].lo && pc < e.ranges[e.last].hi)) {
-        int lo = 0, hi = e.nranges - 1, found = -1;
-        while (lo <= hi) { int m = (lo + hi) / 2; if (pc < e.ranges[m].lo) hi = m - 1; else if (pc >= e.ranges[m].hi) lo = m + 1; else { found = m; break; } }
-        if (found < 0) return false;
-        e.last = found;
-    }
-    uint8_t& st = e.state[size_t(e.last)];
-    if (st == 0) st = crc_range(mem, e.ranges[e.last].lo, e.ranges[e.last].hi) == e.ranges[e.last].crc ? 1 : 2;
-    return st == 1;
-}
-
+// TEntry, entry_code_ok and pick_entry live in translate_entry.h (unit-tested by translate_entry_test).
 static std::vector<TEntry>& sub_entries() {
-    static std::vector<TEntry> e = {
-        {lift::sub_has, lift::sub_run, lift::kSubRanges, lift::kSubRangeCount, lift::kSubCrc, false},
+    static std::vector<TEntry> e = [] {
+        std::vector<TEntry> v = {
+            {lift::sub_has, lift::sub_run, lift::kSubRanges, lift::kSubRangeCount, lift::kSubCrc, false},
 #ifdef SNATCHER_TRANSLATED_OVL909
-        {lift::ovl909_has, lift::ovl909_run, lift::kOvl909Ranges, lift::kOvl909RangeCount, lift::kOvl909Crc, true},
+            {lift::ovl909_has, lift::ovl909_run, lift::kOvl909Ranges, lift::kOvl909RangeCount, lift::kOvl909Crc, true},
 #endif
-    };
+        };
+        for (int i = 0; i < lift::kOverlayCount; ++i) {   // overlay dumps from the census (ADR-003), first CRC match wins
+            const lift::Program& p = lift::kOverlays[i];
+            v.push_back({p.has, p.run, p.ranges, *p.nranges, *p.crc, true});
+        }
+        return v;
+    }();
     return e;
 }
 
@@ -500,15 +480,8 @@ int System::run_sub_translated(int cycles) {
         bool irq_blocked = sub_irq_level() <= int((sr >> 8) & 7);
         if (ovl_track_ && pc >= 0x28000 && pc < 0x80000) note_overlay_exec();   // before translated overlay code can modify its own image
         // First program whose code at pc is in memory exactly as translated (overlays are re-checked after every disc load into PRG RAM).
-        TEntry* te = nullptr;
         bool claimed = false;
-        if (irq_blocked) {
-            for (auto& e : sub_entries()) {
-                if (!e.has(pc)) continue;
-                claimed = true;
-                if (entry_code_ok(e, prg_ram_, pc, e.overlay ? prg_ovl_gen_ : 0)) { te = &e; break; }
-            }
-        }
+        TEntry* te = irq_blocked ? pick_entry(sub_entries(), prg_ram_, pc, prg_ovl_gen_, claimed) : nullptr;
         fallback_why_ = !irq_blocked ? Fallback::kIrqEntry : claimed ? Fallback::kCodeMismatch : Fallback::kNotTranslated;
         if (te) {
             for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
@@ -566,6 +539,14 @@ int System::run_sub_translated(int cycles) {
 #endif
 
 #ifdef SNATCHER_TRANSLATED_MAIN
+static std::vector<TEntry>& main_entries() {
+    static std::vector<TEntry> e = {
+        {lift::main_has, lift::main_run, lift::kMainRanges, lift::kMainRangeCount, lift::kMainCrc, false, 0xFFFF},
+        {lift::mainram_has, lift::mainram_run, lift::kMainramRanges, lift::kMainramRangeCount, lift::kMainramCrc, true, 0xFFFF},
+    };
+    return e;
+}
+
 int System::run_main_translated(int cycles) {
     static MainBusAdapter bus(*this);
     lift::Cpu c;
@@ -576,33 +557,23 @@ int System::run_main_translated(int cycles) {
         uint32_t pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
         uint32_t sr = reg_get(M68K_REG_SR);
         bool irq_blocked = main_irq_level() <= int((sr >> 8) & 7);
-        if (irq_blocked && lift::main_has(pc)) {
-            for (int i = 0; i < lift::kMainSpanCount; ++i) {
-                const lift::Span& sp = lift::kMainSpans[i];
-                if (pc >= sp.lo && pc < sp.hi && !main_span_checked_) {
-                    main_span_checked_ = true;
-                    main_span_ok_ = crc_range(main_ram_, sp.lo & 0xFFFF, sp.hi & 0xFFFF ? (sp.hi & 0xFFFF) : 0x10000) == sp.crc;
-                    if (!main_span_ok_) log("[translate] Main code differs from the translated image; using the interpreter\n");
-                }
-            }
-            if (main_span_ok_) {
-                for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
-                c.set_ccr(sr & 0x1F);
-                c.sr_sys = uint16_t(sr & 0xA700);
-                lift::Exit ex = lift::main_run(c, pc, budget);
-                for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, c.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, c.a[i]); }
-                reg_set(M68K_REG_SP, c.a[7]);
-                reg_set(M68K_REG_SR, c.sr_sys | c.ccr());
-                reg_set(M68K_REG_PC, ex.pc);
-                if (ex.kind == lift::Exit::Budget) break;
-                if (halted_) break;
-                if (ex.kind == lift::Exit::NotTranslated) continue;
-                fallback_why_ = Fallback::kUnsupported;
-            } else {
-                fallback_why_ = Fallback::kCodeMismatch;
-            }
-        } else {
-            fallback_why_ = !irq_blocked ? Fallback::kIrqEntry : Fallback::kNotTranslated;
+        // The IP is checked once per range; the $FFE100 code again after every Main write to its window (main_code_gen_).
+        bool claimed = false;
+        TEntry* te = irq_blocked ? pick_entry(main_entries(), main_ram_, pc, main_code_gen_, claimed) : nullptr;
+        fallback_why_ = !irq_blocked ? Fallback::kIrqEntry : claimed ? Fallback::kCodeMismatch : Fallback::kNotTranslated;
+        if (te) {
+            for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
+            c.set_ccr(sr & 0x1F);
+            c.sr_sys = uint16_t(sr & 0xA700);
+            lift::Exit ex = te->run(c, pc, budget);
+            for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, c.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, c.a[i]); }
+            reg_set(M68K_REG_SP, c.a[7]);
+            reg_set(M68K_REG_SR, c.sr_sys | c.ccr());
+            reg_set(M68K_REG_PC, ex.pc);
+            if (ex.kind == lift::Exit::Budget) break;
+            if (halted_) break;
+            if (ex.kind == lift::Exit::NotTranslated) continue;   // re-dispatch: the IP calls into $FFE100 and back
+            fallback_why_ = Fallback::kUnsupported;
         }
         ++fallback_steps_;
         int used = m68k_execute(1);
@@ -771,7 +742,10 @@ void System::main_write8(uint32_t a, uint32_t v) {
         else if (r >= 0x11 && r < 0x18 && (r & 1)) psg_.write(uint8_t(v));
         return;
     }
-    if (a >= 0xE00000) main_ram_[a & 0xFFFF] = uint8_t(v);
+    if (a >= 0xE00000) {
+        main_ram_[a & 0xFFFF] = uint8_t(v);
+        if ((a & 0xFFFF) - 0xE100u < 0x2D0u) ++main_code_gen_;   // the $FFE100 code (mainram program) changed: re-check its CRC ranges
+    }
 }
 
 void System::main_write16(uint32_t a, uint32_t v) {

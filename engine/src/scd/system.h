@@ -115,7 +115,7 @@ private:
     uint32_t prg_ovl_gen_ = 0;
     int run_main_translated(int cycles);
     int32_t* main_budget_ = nullptr;
-    bool main_span_checked_ = false, main_span_ok_ = false;
+    uint32_t main_code_gen_ = 0;   // bumped by Main writes to the $FFE100 code window: its ranges are re-checked
     bool translate_ = false;
     bool span_ok_[4] = {false, false, false, false};
     bool span_checked_[4] = {false, false, false, false};
