@@ -29,6 +29,8 @@ enum Button : uint16_t {
 
 constexpr int kSampleRate = 48000;
 
+struct StateHash { uint64_t vram, ram, fb; };
+
 class System {
 public:
     static System& instance();
@@ -70,6 +72,12 @@ public:
     uint8_t* prg_ram() { return prg_ram_; }
     uint8_t* word_ram() { return word_ram_; }
     Vdp& vdp() { return vdp_; }
+    // FNV-1a hashes of VDP memory+registers, RAM and the framebuffer (playtest checkpoints).
+    StateHash state_hash();
+    void cpu_pcs(uint32_t* main_pc, uint32_t* sub_pc);
+    uint16_t e020() const { return uint16_t(main_ram_[0xE020] << 8 | main_ram_[0xE021]); }
+    uint16_t e022() const { return uint16_t(main_ram_[0xE022] << 8 | main_ram_[0xE023]); }
+    uint16_t e06c() const { return uint16_t(main_ram_[0xE06C] << 8 | main_ram_[0xE06D]); }
     // Prints PCs and key registers of both CPUs, the CD state and the PCM channels to the log.
     void dump_state();
     // Debug log file (SNATCHER_LOG / --log): everything log() prints plus CD loads, CD-DA, input changes, game-state
