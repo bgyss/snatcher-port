@@ -62,15 +62,27 @@ class TestTranslatedCensus(unittest.TestCase):
         self.assertNotIn("interpreter", reasons)
         self.assertIn("irq_entry", reasons)
 
+    @unittest.skipUnless(INTERP.exists(), "interpreter build missing")
     def test_main_ram_code_is_translated(self):
-        # The SP routine the Main CPU copies to $FFE100 runs through the mainram program (Task 6, ADR-003):
-        # $FFE140 runs every frame from about frame 1020, and nothing on Main fails its per-range CRC check.
+        # The SP routine the Main CPU copies to $FFE100 runs through the mainram program (ADR-003):
+        # $FFE106 and $FFE140 run every frame from about frame 1020, and nothing on Main fails its per-range CRC check.
+        # Liveness comes from the interpreter build, where every step is a census row. On the translated build,
+        # $FFE140 (reached by recursive descent from $FFE100) and every PC in the mainram seed file
+        # (`mise run census`, which seeds $FFE106) must not appear at all.
+        fi = OUT / "interp_main.tsv"
+        run(INTERP, 1100, SCD_COVERAGE=str(fi))
+        ran = {int(x[3], 16) for x in rows(fi) if x[0] == "main" and 0xFFE100 <= int(x[3], 16) < 0xFFE3D0}
+        self.assertIn(0xFFE106, ran, "the $FFE100 code did not run")
+        self.assertIn(0xFFE140, ran, "the $FFE100 code did not run")
         f = OUT / "tr_main.tsv"
         run(TRANS, 1100, SCD_COVERAGE=str(f))
         main = [x for x in rows(f) if x[0] == "main"]
         window = {int(x[3], 16): x[2] for x in main if 0xFFE100 <= int(x[3], 16) < 0xFFE3D0}
-        self.assertIn(0xFFE106, window, "the $FFE100 code did not run")   # not reached by the mainram program's recursive descent
-        self.assertNotIn(0xFFE140, window)
+        seeds = ROOT / "extracted" / "code" / "seeds" / "mainram.txt"
+        expected = {0xFFE140}
+        if seeds.exists():
+            expected |= {int(l, 16) for l in seeds.read_text().splitlines() if l.strip() and not l.startswith("#")}
+        self.assertEqual({pc: window[pc] for pc in expected & window.keys()}, {}, "seeded $FFE100 code ran in the interpreter")
         self.assertNotIn("code_mismatch", {x[2] for x in main})
 
     def test_lift_verify_disables_census(self):

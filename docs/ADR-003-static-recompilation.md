@@ -72,3 +72,16 @@ the options and sound test. The future autonomous explorer (`docs/PLAYTEST.md`, 
 
 - M1: `docs/superpowers/plans/2026-10-05-recomp-m1-coverage.md`.
 - M2 to M6: written when the previous milestone's census is in hand. M2's interrupt-delivery points depend on which loops M1 shows the game spending its time in.
+
+## Progress
+
+M1, 2026-10-05. Replay set: `tools/playtest/replays/intro_skip.replay` only (60000 frames, reaches the first in-game screen). Gate passes on intro_skip for disc code only; M1 is not complete until the replays for every act, a shooting section, save/load and options/sound test exist and `mise run coverage` passes over all of them.
+
+| intro_skip, translated build | not_translated | code_mismatch | irq_entry | hle_stub | unsupported |
+|---|---|---|---|---|---|
+| before seeds | 1888349 steps / 798 pcs | 12 / 2 pcs | 1345692 | 123243 | 0 |
+| after `mise run census` + `mise run coverage` | 478615 / 8 pcs | 0 | 1345684 | 123249 | 0 |
+
+- Overlay images seen: `ovl_936869c7` (the `ovl_909.bin` dump), `ovl_a7b6f72d`. Both are translated from their census dumps. The 2 code_mismatch PCs before seeds were the ovl_909 program claiming PCs inside `ovl_a7b6f72d`.
+- `mainram` (`$FFE100..$FFE3D0`): no interpreter steps after seeding (`$FFE106` was the one not_translated PC), no code_mismatch on Main.
+- The 8 remaining PCs are host-built BIOS glue at addresses no program covers (`unmapped:sub` 7: `$180..$18E` level-2 wrapper, `$5F7C` jump slot, `$200`/`$206` boot stub; `unmapped:main` 1: `$FFFDAE` jump slot to the `_BURAM` trap). `coverage --check` fails on them until they are either reported as `hle_stub` or translated (open decision).
