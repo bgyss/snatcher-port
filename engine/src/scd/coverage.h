@@ -17,9 +17,10 @@ enum class Fallback : uint8_t {
     kInterpreter,     // translation is off (interpreter build or SCD_NO_TRANSLATE)
     kNotTranslated,   // no translated program covers this PC
     kCodeMismatch,    // a program covers it, but the bytes in memory differ from what was translated
-    kIrqEntry,        // an interrupt is pending: Musashi takes the exception (translated code runs only with IRQs masked)
+    kIrqEntry,        // M1 only: Musashi took a pending interrupt. Since M2 interrupts are taken in host code and this never occurs;
+                      // kept so the TSV names and older censuses stay valid
     kHleStub,         // a BIOS HLE trap stub or the rts after it
-    kUnsupported,     // translated code stopped at an instruction it does not implement (rte, a privileged one in user mode, ...)
+    kUnsupported,     // translated code stopped at an instruction it does not implement (a privileged one in user mode, ...)
     kCount
 };
 

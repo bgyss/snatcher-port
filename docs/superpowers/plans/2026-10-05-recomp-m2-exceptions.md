@@ -22,7 +22,8 @@
 - Python tools run with `.venv/bin/python`.
 - Bit-identity: `engine/build/lift_diff 8` must report `failing cases 0` and `failing interrupt entries 0` after every task that touches the translator or `cpu68k.h`.
 - Bit-identity: after every task that changes generated code or the runtime, the translated build must match the **parent reference build** `work/parent-src/engine/build/scd_headless` (Task 1, source `c98c81f`) at every checkpoint, RAM included (`tools/playtest/run.py ... --strict-ram`), on `tools/playtest/replays/intro_skip.replay` over 60000 frames. The only exception is the branch Task 5 spells out.
-- Build the parent reference once in Task 1 and never rebuild it. Do not write seed files before Task 7: no `--seeds-out`, no `mise run census`, no `mise run coverage`. The parent and the M2 build must translate the same PCs.
+  *Amended at Task 5:* Task 5 took that branch and re-based the reference. From Task 6 on, `work/parent-src` is the translated build at `5fa5778` (rebuilt from `work/parent-src-5fa5778.tar`); the `c98c81f` reference is kept at `work/parent-src-m1`.
+- Build the parent reference once in Task 1 and never rebuild it (*amended:* except the one re-base at Task 5, above). Do not write seed files before Task 7: no `--seeds-out`, no `mise run census`, no `mise run coverage`. The parent and the M2 build must translate the same PCs.
 - Return addresses stay 24-bit in M2. Frames pushed in host code carry the PC that M1's Musashi step pushed. At the top of a dispatch step that is Musashi's PC register (24-bit after a translated exit). Inside an SR write it is the translated next PC (`rte`: the popped value, unmasked). Translated `jsr`/`bsr` keep pushing 24-bit constants (`tools/lift/emit.py:11`, `:13`), where the interpreter pushes `$FFFFxxxx` on Main. `rts`/`rte` mask the popped value before dispatch, so control flow is unaffected, and the strict-RAM gate is against the parent. Matching the interpreter's stack bytes is M3 work, together with cycle accounting.
 - Cycle accounting: an instruction that raises an exception costs exactly `lift::exc_cycles(vector)` in total, and an interrupt entry costs `lift::exc_cycles(24 + level)` = 44, both as in Musashi. Everything else keeps base-only cycles (`m68ki_cycles[0][op]`, `tools/lift/gen_program.py:218`). Dynamic cycle adjustments are M3.
 - A privileged instruction executed in user mode leaves translated code with `Exit::Unsupported`, and Musashi takes the privilege violation. Task 1 checks that the game never runs in user mode.
@@ -70,7 +71,7 @@ Facts later tasks branch on. Only `docs/JOURNAL.md` is committed. The probe is a
 
 **Interfaces:**
 - Produces:
-  - `work/parent-src/engine/build/scd_headless`: the M1 translated build at `c98c81f`, the strict-RAM reference for Tasks 3 to 7. Never rebuilt.
+  - `work/parent-src/engine/build/scd_headless`: the M1 translated build at `c98c81f`, the strict-RAM reference for Tasks 3 to 7. Never rebuilt. *Amended at Task 5:* rebuilt once from `5fa5778` for Tasks 6 and 7; this `c98c81f` build moved to `work/parent-src-m1`.
   - Journal facts F1 to F5, which later tasks branch on:
     - **F1** = number of translated SR writes that left a pending level above the new mask (an interrupt the parent defers but Musashi takes at once). Branch **D1** in Task 5.
     - **F2** = number of user-mode observations (S = 0). Branch **D2** below.

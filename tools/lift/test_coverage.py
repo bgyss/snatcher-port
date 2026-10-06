@@ -1,5 +1,8 @@
 """End-to-end tests for the fallback census (ADR-003 M1). Skips without the disc or the builds."""
 import os, pathlib, subprocess, unittest, zlib
+import sys
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+import coverage_report as cr
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CUE = ROOT / "sega-cd-eng" / "Snatcher (Sega CD) (U)-redump.cue"
@@ -81,7 +84,7 @@ class TestTranslatedCensus(unittest.TestCase):
         # $FFE106 and $FFE140 run every frame from about frame 1020, and nothing on Main fails its per-range CRC check.
         # Liveness comes from the interpreter build, where every step is a census row. On the translated build,
         # nothing in $FFE100..$FFE3D0 may run as not_translated once the mainram seed file (`mise run census`, which
-        # seeds $FFE106) exists; irq_entry rows (an interrupt taken there) are allowed.
+        # seeds $FFE106) exists. Since M2 no irq_entry rows appear (interrupts are taken in host code).
         fi = OUT / "interp_main.tsv"
         run(INTERP, 1100, SCD_COVERAGE=str(fi))
         ran = {int(x[3], 16) for x in rows(fi) if x[0] == "main" and 0xFFE100 <= int(x[3], 16) < 0xFFE3D0}
@@ -96,6 +99,12 @@ class TestTranslatedCensus(unittest.TestCase):
             self.skipTest("extracted/code/seeds/mainram.txt missing: run `mise run census` and rebuild the translated build")
         window = {int(x[3], 16) for x in main if x[2] == "not_translated" and 0xFFE100 <= int(x[3], 16) < 0xFFE3D0}
         self.assertEqual(window, set(), "$FFE100 code ran in the interpreter (not_translated)")
+
+    def test_only_hle_steps_remain(self):
+        # ADR-003 M2 exit criterion on a short run: with host-built BIOS glue counted as HLE, every Musashi step is hle_stub.
+        f = OUT / "tr_m2.tsv"
+        run(TRANS, 1500, SCD_COVERAGE=str(f))
+        self.assertEqual({k[2] for k in cr.merge([str(f)])}, {"hle_stub"})
 
     def test_lift_verify_disables_census(self):
         f = OUT / "verify.tsv"

@@ -97,5 +97,46 @@ class TestCheck(Base):
         self.assertIn("FAIL", out)
 
 
+class TestHostGlue(Base):
+    def run_main(self, *args):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cr.main(list(args))
+        return rc, buf.getvalue()
+
+    def test_glue_is_reported_as_hle_stub(self):
+        a = self.census("a.tsv",
+                        "sub\t00000000\tnot_translated\t000180\t5\n"       # level-2 wrapper
+                        "sub\t00000000\tnot_translated\t00018e\t5\n"
+                        "sub\t00000000\tnot_translated\t000206\t1\n"       # boot stub
+                        "sub\t00000000\tnot_translated\t005f82\t5\n"       # level-3 jump slot
+                        "main\t00000000\tnot_translated\tfffd06\t5\n"      # V-INT jump slot
+                        "main\t00000000\tnot_translated\tfffdae\t1\n")     # Main _BURAM jump slot
+        self.assertEqual({k[2] for k in cr.merge([a])}, {"hle_stub"})
+        rc, out = self.run_main(a, "--code-dir", self.code, "--check", "--gate", "m2")
+        self.assertEqual(rc, 0, out)
+
+    def test_glue_bounds(self):
+        self.assertTrue(cr.host_glue("sub", 0x190))
+        self.assertFalse(cr.host_glue("sub", 0x192))
+        self.assertFalse(cr.host_glue("sub", 0x5F22))      # _CDBIOS: an HLE stub the runtime already labels
+        self.assertTrue(cr.host_glue("main", 0xFFFD78))
+        self.assertFalse(cr.host_glue("main", 0xFFFD7E))
+        self.assertFalse(cr.host_glue("main", 0xFF0EFA))   # IP code is never glue
+        self.assertFalse(cr.host_glue("main", 0x000180))   # glue ranges are per CPU
+
+    def test_m2_gate_rejects_irq_entry_and_unsupported(self):
+        a = self.census("a.tsv",
+                        "main\t00000000\tirq_entry\tff0584\t9\n"
+                        "sub\t00000000\tunsupported\t00d600\t9\n"
+                        "main\t00000000\thle_stub\t00036c\t9\n")
+        rc, _ = self.run_main(a, "--code-dir", self.code, "--check", "--gate", "m1")
+        self.assertEqual(rc, 0)
+        rc, out = self.run_main(a, "--code-dir", self.code, "--check", "--gate", "m2")
+        self.assertEqual(rc, 1)
+        self.assertIn("irq_entry", out)
+        self.assertIn("unsupported", out)
+
+
 if __name__ == "__main__":
     unittest.main()
