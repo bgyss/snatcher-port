@@ -17,7 +17,9 @@ struct Bus {
 };
 
 struct Exit {
-    enum Kind { None, Unsupported, DivZero, Trap, Budget, NotTranslated };
+    // DivZero and Trap are no longer produced (ADR-003 M2 translates them); kept so the numeric kinds stay stable.
+    // Irq: an SR write unmasked a pending interrupt; pc is the PC to push. Stop: `stop` executed; pc is the next instruction.
+    enum Kind { None, Unsupported, DivZero, Trap, Budget, NotTranslated, Irq, Stop };
     uint32_t pc = 0;
     Kind kind = None;
     int arg = 0;
@@ -39,8 +41,11 @@ struct Program {
 
 struct Cpu {
     uint32_t d[8] = {}, a[8] = {};   // a[7] is the active stack pointer
+    uint32_t other_sp = 0;           // the inactive one: USP in supervisor mode, SSP in user mode
     bool x = false, n = false, z = false, v = false, c = false;
-    uint16_t sr_sys = 0x2000;        // supervisor bits and interrupt mask
+    uint16_t sr_sys = 0x2000;        // trace, supervisor and interrupt mask bits (SR & 0xA700)
+    uint16_t exc_cycles = 0;         // set by exception_entry(): total cycles of the instruction that raised it
+    const int* ipl = nullptr;        // pending interrupt level as the CPU sees it (System::cpu_irq_); nullptr = none
     Bus* bus = nullptr;
 
     uint32_t ccr() const { return (x << 4) | (n << 3) | (z << 2) | (v << 1) | uint32_t(c); }
@@ -104,6 +109,56 @@ inline bool cond(const Cpu& c, int cc) {
         case 12: return c.n == c.v; case 13: return c.n != c.v;
         case 14: return !c.z && c.n == c.v; default: return c.z || c.n != c.v;
     }
+}
+
+// ---- Exceptions (ADR-003 M2). What Musashi does on a 68000; lift_diff checks each against it.
+
+// Total cycles of an exception an instruction raises, or of an interrupt entry (Musashi's m68ki_exception_cycle_table[0]).
+constexpr int exc_cycles(int vector) {
+    return vector == 5 ? 38 : vector == 6 ? 40 : (vector == 15 || (vector >= 24 && vector < 32)) ? 44 : 34;
+}
+
+// SR write (move to sr, andi/ori/eori #,sr, rte, stop) like m68ki_set_sr: the stack pointers swap when S changes. Returns true when
+// a pending interrupt is now above the mask: Musashi takes it inside this instruction, so generated code returns Exit::Irq.
+inline bool set_sr(Cpu& c, uint32_t v) {
+    const bool was_s = (c.sr_sys & 0x2000) != 0;
+    c.set_ccr(v);
+    c.sr_sys = uint16_t(v & 0xA700);
+    if (((c.sr_sys & 0x2000) != 0) != was_s) std::swap(c.a[7], c.other_sp);
+    return c.ipl && *c.ipl > int((c.sr_sys >> 8) & 7);
+}
+
+// m68ki_init_exception: supervisor mode (switching to the SSP), trace off. Returns the SR to stack.
+inline uint16_t enter_exception(Cpu& c) {
+    const uint16_t sr = uint16_t(c.sr_sys | c.ccr());
+    if (!(c.sr_sys & 0x2000)) std::swap(c.a[7], c.other_sp);
+    c.sr_sys = uint16_t((c.sr_sys | 0x2000) & ~0x8000);
+    return sr;
+}
+
+// The 68000's 3-word frame: PC (long), then SR (word) on top.
+inline void push_frame(Cpu& c, uint32_t pc, uint16_t sr) {
+    c.a[7] -= 4; c.bus->w32(c.a[7], pc);
+    c.a[7] -= 2; c.bus->w16(c.a[7], sr);
+}
+
+// trap #n (vector 32 + n), chk (6), divide by zero (5), as m68ki_exception_trap / trapN: frame, then the vector.
+// pc is the next instruction. Returns the handler address; the instruction's total cost becomes exc_cycles(vector).
+inline uint32_t exception_entry(Cpu& c, int vector, uint32_t pc) {
+    push_frame(c, pc, enter_exception(c));
+    c.exc_cycles = uint16_t(exc_cycles(vector));
+    return c.bus->r32(uint32_t(vector) * 4);
+}
+
+// Autovectored interrupt entry, as m68ki_exception_interrupt: the mask rises to the level, the vector is read (an empty one
+// falls back to vector 15), then the frame. The caller has acknowledged the interrupt and charges exc_cycles(24 + level).
+inline uint32_t interrupt_entry(Cpu& c, int level, uint32_t pc) {
+    const uint16_t sr = enter_exception(c);
+    c.sr_sys = uint16_t((c.sr_sys & ~0x0700) | (level << 8));
+    uint32_t npc = c.bus->r32(uint32_t(24 + level) * 4);
+    if (npc == 0) npc = c.bus->r32(15 * 4);
+    push_frame(c, pc, sr);
+    return npc;
 }
 
 // Shifts and rotates. kind: 0 AS, 1 LS, 2 ROX, 3 RO; left: direction; count already reduced by the caller (mod 64).
