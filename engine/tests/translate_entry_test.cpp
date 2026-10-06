@@ -86,6 +86,15 @@ int main() {
         std::vector<TEntry> none = {{has_none, no_run, ovl_a, 2, 0, false}};
         assert(pick_entry(none, prg.data(), 0x28000, 9, claimed) == nullptr && !claimed);
     }
+    {   // ADR-003 M2 dispatch loop: deliver above the mask, never twice in a row, idle while stopped
+        assert(loop_step(false, false, 6, 0x2500) == LoopStep::kDeliver);   // level 6 above mask 5
+        assert(loop_step(false, false, 5, 0x2500) == LoopStep::kRun);       // equal to the mask: blocked
+        assert(loop_step(false, false, 0, 0x2000) == LoopStep::kRun);
+        assert(loop_step(true, false, 6, 0x2000) == LoopStep::kRun);        // after an entry: the handler's first instruction first
+        assert(loop_step(false, true, 2, 0x2300) == LoopStep::kIdle);       // stopped, the pending level is masked
+        assert(loop_step(false, true, 4, 0x2300) == LoopStep::kDeliver);    // stopped, an interrupt wakes it
+        assert(loop_step(false, false, 4, 0x0300) == LoopStep::kDeliver);   // user mode: the same rule
+    }
     std::puts("translate_entry_test: ok");
     return 0;
 }

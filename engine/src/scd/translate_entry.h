@@ -58,4 +58,15 @@ inline TEntry* pick_entry(std::vector<TEntry>& entries, const uint8_t* mem, uint
     return nullptr;
 }
 
+// What the translated-code dispatch loop does next (ADR-003 M2). Interrupts are taken where Musashi's m68k_execute checks them, at the
+// top of each step, except right after an entry (force_one): M1's irq_entry Musashi step ran the handler's first instruction with
+// the entry, and the loop keeps that. A stopped CPU idles unless an interrupt is deliverable.
+enum class LoopStep { kDeliver, kIdle, kRun };
+
+inline LoopStep loop_step(bool force_one, bool stopped, int ipl, uint32_t sr) {
+    if (!force_one && ipl > int((sr >> 8) & 7)) return LoopStep::kDeliver;
+    if (stopped) return LoopStep::kIdle;
+    return LoopStep::kRun;
+}
+
 }  // namespace scd

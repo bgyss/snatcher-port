@@ -18,6 +18,8 @@ extern "C" {
 #include "ym3438.h"
 }
 
+namespace lift { struct Cpu; }
+
 namespace scd {
 
 // printf-style line to stderr and, when open_log() is active, the log file.
@@ -122,6 +124,12 @@ private:
     uint64_t translated_instr_budget_ = 0, fallback_steps_ = 0, verified_ = 0;
     uint32_t exit_ring_[16] = {};
     uint32_t exit_pos_ = 0;
+    // ADR-003 M2: the translated register file to and from Musashi (the register home between translated runs until M4),
+    // and interrupt entry in host code. stopped_: a translated `stop` parked the CPU until an interrupt.
+    void lift_load(lift::Cpu& c);
+    void lift_store(const lift::Cpu& c, uint32_t pc);
+    uint32_t take_irq(lift::Cpu& c, int level, uint32_t pc, int32_t& budget);
+    bool stopped_[2] = {false, false};
 
     // CPU scheduling
     void select_cpu(Cpu c);

@@ -212,6 +212,7 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     frames_ = 0;
     line_ = 0;
     halted_ = false;
+    stopped_[0] = stopped_[1] = false;
     return true;
 }
 
@@ -466,69 +467,112 @@ static std::vector<TEntry>& sub_entries() {
     return e;
 }
 
+// Musashi's SR write neither swaps stacks nor checks interrupts (m68k_set_reg), so the inactive stack pointer travels explicitly:
+// USP in supervisor mode, ISP in user mode.
+void System::lift_load(lift::Cpu& c) {
+    const uint32_t sr = reg_get(M68K_REG_SR);
+    for (int i = 0; i < 8; ++i) c.d[i] = reg_get(M68K_REG_D0 + i);
+    for (int i = 0; i < 7; ++i) c.a[i] = reg_get(M68K_REG_A0 + i);
+    c.a[7] = reg_get(M68K_REG_SP);
+    c.other_sp = reg_get((sr & 0x2000) ? M68K_REG_USP : M68K_REG_ISP);
+    c.set_ccr(sr & 0x1F);
+    c.sr_sys = uint16_t(sr & 0xA700);
+}
+
+void System::lift_store(const lift::Cpu& c, uint32_t pc) {
+    for (int i = 0; i < 8; ++i) reg_set(M68K_REG_D0 + i, c.d[i]);
+    for (int i = 0; i < 7; ++i) reg_set(M68K_REG_A0 + i, c.a[i]);
+    reg_set(M68K_REG_SR, c.sr_sys | c.ccr());
+    reg_set(M68K_REG_SP, c.a[7]);
+    reg_set((c.sr_sys & 0x2000) ? M68K_REG_USP : M68K_REG_ISP, c.other_sp);
+    reg_set(M68K_REG_PC, pc);
+}
+
+// Interrupt entry in host code, as Musashi's m68ki_exception_interrupt: acknowledge (clears the source, refreshes the IPL),
+// then frame and vector (lift::interrupt_entry), 44 cycles. pc is what Musashi would push.
+uint32_t System::take_irq(lift::Cpu& c, int level, uint32_t pc, int32_t& budget) {
+    int_ack(level);
+    stopped_[cur_] = false;
+    budget -= lift::exc_cycles(24 + level);
+    return lift::interrupt_entry(c, level, pc);
+}
+
 // Runs the Sub CPU for `cycles`, executing translated code where available and falling back to Musashi per instruction.
-// Returns cycles actually used. cur_ must be kSub.
+// Interrupts are taken in host code (ADR-003 M2). Returns cycles actually used. cur_ must be kSub.
 int System::run_sub_translated(int cycles) {
     static LogBus bus(*this);
     static const bool verify = std::getenv("SCD_LIFT_VERIFY") != nullptr;
     lift::Cpu c;
     c.bus = &bus;
+    c.ipl = &cpu_irq_[kSub];          // the level Musashi sees; a translated SR write that unmasks it exits with Exit::Irq
     int32_t budget = cycles;
-    while (budget > 0) {
+    bool force_one = false;           // after an entry: run exactly the handler's first instruction before the next check
+    while (budget > 0 || force_one) {
+        const LoopStep step = loop_step(force_one, stopped_[kSub], cpu_irq_[kSub], reg_get(M68K_REG_SR));
+        if (step == LoopStep::kDeliver) {
+            lift_load(c);
+            lift_store(c, take_irq(c, cpu_irq_[kSub], reg_get(M68K_REG_PC), budget));
+            force_one = true;
+            continue;
+        }
+        if (step == LoopStep::kIdle) { budget = 0; break; }   // stopped: Musashi consumes the slice the same way
         uint32_t pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
-        uint32_t sr = reg_get(M68K_REG_SR);
-        bool irq_blocked = sub_irq_level() <= int((sr >> 8) & 7);
         if (ovl_track_ && pc >= 0x28000 && pc < 0x80000) note_overlay_exec();   // before translated overlay code can modify its own image
         // First program whose code at pc is in memory exactly as translated (overlays are re-checked after every disc load into PRG RAM).
         bool claimed = false;
-        TEntry* te = irq_blocked ? pick_entry(sub_entries(), prg_ram_, pc, prg_ovl_gen_, claimed) : nullptr;
-        fallback_why_ = !irq_blocked ? Fallback::kIrqEntry : claimed ? Fallback::kCodeMismatch : Fallback::kNotTranslated;
+        TEntry* te = pick_entry(sub_entries(), prg_ram_, pc, prg_ovl_gen_, claimed);
+        fallback_why_ = claimed ? Fallback::kCodeMismatch : Fallback::kNotTranslated;
+        const bool single = force_one;
+        force_one = false;
         if (te) {
-            for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
-            c.set_ccr(sr & 0x1F);
-            c.sr_sys = uint16_t(sr & 0xA700);
-            {
-                int32_t before = budget;
-                lift::Cpu saved = c;
-                uint32_t spc = pc;
-                if (verify) { bus.logging = true; bus.writes.clear(); budget = 1; before = 1; }
-                lift::Exit ex = te->run(c, pc, budget);
-                if (verify && ex.kind != lift::Exit::NotTranslated && ex.kind != lift::Exit::Unsupported) {
-                    // Undo the writes, replay the same instruction in Musashi, compare.
-                    auto writes = bus.writes; bus.logging = false;
-                    std::vector<uint8_t> after(writes.size());
-                    for (size_t i = 0; i < writes.size(); ++i) after[i] = uint8_t(sub_read8(writes[i].first));
-                    for (size_t i = writes.size(); i-- > 0;) sub_write8(writes[i].first, writes[i].second);
-                    for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, saved.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, saved.a[i]); }
-                    reg_set(M68K_REG_SR, saved.sr_sys | saved.ccr()); reg_set(M68K_REG_SP, saved.a[7]); reg_set(M68K_REG_PC, spc);
-                    m68k_execute(1);
-                    bool bad = false;
-                    for (auto& w : writes) if (w.first >= 0xFE0000) bad = true;   // I/O side effects (gate array, PCM, BRAM) make a replay meaningless
-                    for (int i = 0; i < 8 && !bad; ++i) {
-                        uint32_t m = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP);
-                        if (reg_get(M68K_REG_D0 + i) != c.d[i]) { log("[lift-verify] pc=%06x op=%04x d%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.d[i], reg_get(M68K_REG_D0 + i)); bad = true; }
-                        else if (m != c.a[i]) { log("[lift-verify] pc=%06x op=%04x a%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.a[i], m); bad = true; }
-                    }
-                    if (!bad && (reg_get(M68K_REG_PC) & 0xFFFFFF) != (ex.pc & 0xFFFFFF)) { log("[lift-verify] pc=%06x op=%04x next lift=%06x musashi=%06x\n", spc, read16(spc), ex.pc, reg_get(M68K_REG_PC) & 0xFFFFFF); bad = true; }
-                    if (!bad && (reg_get(M68K_REG_SR) & 0x1F) != c.ccr()) { log("[lift-verify] pc=%06x op=%04x ccr lift=%02x musashi=%02x\n", spc, read16(spc), c.ccr(), reg_get(M68K_REG_SR) & 0x1F); bad = true; }
-                    for (size_t i = 0; i < writes.size() && !bad; ++i) if (uint8_t(sub_read8(writes[i].first)) != after[i]) { log("[lift-verify] pc=%06x op=%04x mem[%06x] lift=%02x musashi=%02x\n", spc, read16(spc), writes[i].first, after[i], sub_read8(writes[i].first)); bad = true; }
-                    budget -= 4;
-                    ++verified_;
-                    continue;
+            lift_load(c);
+            int32_t one = 1;
+            int32_t& b = single ? one : budget;
+            int32_t before = b;
+            lift::Cpu saved = c;
+            uint32_t spc = pc;
+            if (verify) { bus.logging = true; bus.writes.clear(); b = 1; before = 1; }
+            lift::Exit ex = te->run(c, pc, b);
+            if (verify && ex.kind != lift::Exit::NotTranslated && ex.kind != lift::Exit::Unsupported && ex.kind != lift::Exit::Stop) {
+                // Undo the writes, replay the same instruction in Musashi with interrupts held off, compare. An SR write that
+                // unmasks one exited with Exit::Irq; the interrupt is taken in host code at the top of the loop.
+                auto writes = bus.writes; bus.logging = false;
+                std::vector<uint8_t> after(writes.size());
+                for (size_t i = 0; i < writes.size(); ++i) after[i] = uint8_t(sub_read8(writes[i].first));
+                for (size_t i = writes.size(); i-- > 0;) sub_write8(writes[i].first, writes[i].second);
+                lift_store(saved, spc);
+                m68k_set_irq(0);
+                m68k_execute(1);
+                m68k_set_irq(unsigned(cpu_irq_[kSub]));
+                lift::Cpu m;
+                lift_load(m);
+                bool bad = false;
+                for (auto& w : writes) if (w.first >= 0xFE0000) bad = true;   // I/O side effects (gate array, PCM, BRAM) make a replay meaningless
+                for (int i = 0; i < 8 && !bad; ++i) {
+                    if (m.d[i] != c.d[i]) { log("[lift-verify] pc=%06x op=%04x d%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.d[i], m.d[i]); bad = true; }
+                    else if (m.a[i] != c.a[i]) { log("[lift-verify] pc=%06x op=%04x a%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.a[i], m.a[i]); bad = true; }
                 }
-                bus.logging = false;
-                translated_instr_budget_ += uint64_t(before - budget);
-                for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, c.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, c.a[i]); }
-                reg_set(M68K_REG_SP, c.a[7]);
-                reg_set(M68K_REG_SR, c.sr_sys | c.ccr());
-                reg_set(M68K_REG_PC, ex.pc);
-                exit_ring_[exit_pos_++ & 15] = uint32_t(ex.kind) << 28 | (ex.pc & 0xFFFFFF);
-                if (ex.kind == lift::Exit::Budget) break;
-                if (ex.kind == lift::Exit::NotTranslated) continue;   // re-dispatch: ex.pc may belong to another program, else the interpreter runs it
-                fallback_why_ = Fallback::kUnsupported;               // Unsupported / Trap / DivZero: Musashi executes the instruction at ex.pc
+                if (!bad && m.other_sp != c.other_sp) { log("[lift-verify] pc=%06x op=%04x inactive sp lift=%08x musashi=%08x\n", spc, read16(spc), c.other_sp, m.other_sp); bad = true; }
+                if (!bad && (reg_get(M68K_REG_PC) & 0xFFFFFF) != (ex.pc & 0xFFFFFF)) { log("[lift-verify] pc=%06x op=%04x next lift=%06x musashi=%06x\n", spc, read16(spc), ex.pc, reg_get(M68K_REG_PC) & 0xFFFFFF); bad = true; }
+                if (!bad && (m.sr_sys | m.ccr()) != (c.sr_sys | c.ccr())) { log("[lift-verify] pc=%06x op=%04x sr lift=%04x musashi=%04x\n", spc, read16(spc), c.sr_sys | c.ccr(), m.sr_sys | m.ccr()); bad = true; }
+                for (size_t i = 0; i < writes.size() && !bad; ++i) if (uint8_t(sub_read8(writes[i].first)) != after[i]) { log("[lift-verify] pc=%06x op=%04x mem[%06x] lift=%02x musashi=%02x\n", spc, read16(spc), writes[i].first, after[i], sub_read8(writes[i].first)); bad = true; }
+                budget -= 4;
+                ++verified_;
+                continue;
             }
+            bus.logging = false;
+            translated_instr_budget_ += uint64_t(before - b);
+            if (single) budget -= 1 - one;
+            uint32_t npc = ex.pc;
+            if (ex.kind == lift::Exit::Irq) npc = take_irq(c, cpu_irq_[kSub], ex.pc, budget);   // taken inside the SR write, as Musashi does
+            if (ex.kind == lift::Exit::Stop) stopped_[kSub] = true;
+            lift_store(c, npc);
+            exit_ring_[exit_pos_++ & 15] = uint32_t(ex.kind) << 28 | (ex.pc & 0xFFFFFF);
+            // Budget ends the loop (or, after a single instruction, goes on); NotTranslated re-dispatches: ex.pc may belong to another program.
+            if (ex.kind == lift::Exit::Budget || ex.kind == lift::Exit::NotTranslated || ex.kind == lift::Exit::Irq || ex.kind == lift::Exit::Stop) continue;
+            fallback_why_ = Fallback::kUnsupported;   // Musashi executes the instruction at ex.pc
         }
-        // Interpreter step (also services pending interrupts).
+        // Interpreter step.
         ++fallback_steps_;
         int used = m68k_execute(1);
         budget -= used > 0 ? used : 4;
@@ -551,28 +595,38 @@ int System::run_main_translated(int cycles) {
     static MainBusAdapter bus(*this);
     lift::Cpu c;
     c.bus = &bus;
+    c.ipl = &cpu_irq_[kMain];
     int32_t budget = cycles;
-    main_budget_ = &budget;
-    while (budget > 0) {
+    main_budget_ = &budget;           // VDP DMA stalls are charged here, also during a single handler instruction
+    bool force_one = false;
+    while (budget > 0 || force_one) {
+        const LoopStep step = loop_step(force_one, stopped_[kMain], cpu_irq_[kMain], reg_get(M68K_REG_SR));
+        if (step == LoopStep::kDeliver) {
+            lift_load(c);
+            lift_store(c, take_irq(c, cpu_irq_[kMain], reg_get(M68K_REG_PC), budget));   // vectors through main_read16 ($70: Gate Array H-INT vector)
+            force_one = true;
+            continue;
+        }
+        if (step == LoopStep::kIdle) { budget = 0; break; }
         uint32_t pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
-        uint32_t sr = reg_get(M68K_REG_SR);
-        bool irq_blocked = main_irq_level() <= int((sr >> 8) & 7);
         // The IP is checked once per range; the $FFE100 code again after every Main write to its window (main_code_gen_).
         bool claimed = false;
-        TEntry* te = irq_blocked ? pick_entry(main_entries(), main_ram_, pc, main_code_gen_, claimed) : nullptr;
-        fallback_why_ = !irq_blocked ? Fallback::kIrqEntry : claimed ? Fallback::kCodeMismatch : Fallback::kNotTranslated;
+        TEntry* te = pick_entry(main_entries(), main_ram_, pc, main_code_gen_, claimed);
+        fallback_why_ = claimed ? Fallback::kCodeMismatch : Fallback::kNotTranslated;
+        const bool single = force_one;
+        force_one = false;
         if (te) {
-            for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
-            c.set_ccr(sr & 0x1F);
-            c.sr_sys = uint16_t(sr & 0xA700);
-            lift::Exit ex = te->run(c, pc, budget);
-            for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, c.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, c.a[i]); }
-            reg_set(M68K_REG_SP, c.a[7]);
-            reg_set(M68K_REG_SR, c.sr_sys | c.ccr());
-            reg_set(M68K_REG_PC, ex.pc);
-            if (ex.kind == lift::Exit::Budget) break;
+            lift_load(c);
+            int32_t one = 1;
+            lift::Exit ex = te->run(c, pc, single ? one : budget);
+            if (single) budget -= 1 - one;
+            uint32_t npc = ex.pc;
+            if (ex.kind == lift::Exit::Irq) npc = take_irq(c, cpu_irq_[kMain], ex.pc, budget);
+            if (ex.kind == lift::Exit::Stop) stopped_[kMain] = true;
+            lift_store(c, npc);
             if (halted_) break;
-            if (ex.kind == lift::Exit::NotTranslated) continue;   // re-dispatch: the IP calls into $FFE100 and back
+            // NotTranslated re-dispatches: the IP calls into $FFE100 and back.
+            if (ex.kind == lift::Exit::Budget || ex.kind == lift::Exit::NotTranslated || ex.kind == lift::Exit::Irq || ex.kind == lift::Exit::Stop) continue;
             fallback_why_ = Fallback::kUnsupported;
         }
         ++fallback_steps_;

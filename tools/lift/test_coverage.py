@@ -54,13 +54,26 @@ class TestInterpreterCensus(unittest.TestCase):
 
 @unittest.skipUnless(CUE.exists() and TRANS.exists(), "disc or translated build missing")
 class TestTranslatedCensus(unittest.TestCase):
-    def test_no_interpreter_rows_and_irq_entries_present(self):
+    def test_no_interpreter_or_irq_entry_rows(self):
+        # ADR-003 M2: interrupts are taken in host code, so no Musashi step is an interrupt entry.
         f = OUT / "tr.tsv"
         run(TRANS, 400, SCD_COVERAGE=str(f))
         self.assertIn("translated=1", f.read_text().splitlines()[0])
         reasons = {x[2] for x in rows(f)}
         self.assertNotIn("interpreter", reasons)
-        self.assertIn("irq_entry", reasons)
+        self.assertNotIn("irq_entry", reasons)
+
+    def test_interrupts_enter_translated_handlers(self):
+        # Main's H-INT handlers are vectored through the Gate Array ($70 reads $A12006) into the IP, its V-INT through the RAM
+        # jump slot $FFFD06. After an entry in host code the handler runs as translated code, checked per range like any other:
+        # the only Main code stepped in Musashi is the BIOS RAM jump slots at $FFFD00 and up.
+        f = OUT / "tr_irq.tsv"
+        run(TRANS, 1500, SCD_COVERAGE=str(f))
+        main = [x for x in rows(f) if x[0] == "main"]
+        self.assertNotIn("irq_entry", {x[2] for x in main})
+        self.assertNotIn("code_mismatch", {x[2] for x in main})
+        stepped = {int(x[3], 16) for x in main if x[2] == "not_translated"}
+        self.assertTrue(all(pc >= 0xFFFD00 for pc in stepped), sorted(hex(pc) for pc in stepped))
 
     @unittest.skipUnless(INTERP.exists(), "interpreter build missing")
     def test_main_ram_code_is_translated(self):
