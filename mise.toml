@@ -100,9 +100,9 @@ run = [
 ]
 
 [tasks.coverage]
-description = "ADR-003 M1 gate: run the reference replays on the translated build; fails if code ran in the interpreter for want of translation"
+description = "ADR-003 gate (M2): run the reference replays on the translated build; fails if anything but HLE ran in the interpreter"
 run = [
   "mise run build",
   "tools/lift/census.sh engine/build/scd_headless work/census/translated tools/playtest/replays/*.replay ${CENSUS_REPLAYS:-}",
-  "python tools/lift/coverage_report.py work/census/translated/*.tsv --code-dir extracted/code --seeds-out extracted/code/seeds --check",
+  "python tools/lift/coverage_report.py work/census/translated/*.tsv --code-dir extracted/code --seeds-out extracted/code/seeds --check --gate m2",
 ]
