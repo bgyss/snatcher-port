@@ -1,5 +1,5 @@
 """Flow glue shared by the test generator and the program generator."""
-from m68k_decode import hx
+from m68k_decode import hx, PRIV
 
 
 def flow_code(ins):
@@ -13,6 +13,7 @@ def flow_code(ins):
     if f[0] == 'jump_dyn': return ['npc = tgt;']
     if f[0] == 'call_dyn': return ['c.a[7] -= 4; c.bus->w32(c.a[7], %s); npc = tgt;' % hx(nxt)]
     if f[0] == 'ret': return ['npc = c.bus->r32(c.a[7]); c.a[7] += 4;']
-    if f[0] == 'rte': return ['{ uint32_t f = c.bus->r16(c.a[7]); c.a[7] += 2; npc = c.bus->r32(c.a[7]); c.a[7] += 4; c.set_ccr(f); c.sr_sys = f & 0xA700; }']
+    if f[0] == 'rte': return [PRIV % hx(ins.pc),   # pull SR, then PC; then the SR write (stack swap, a pending interrupt), as Musashi
+                              '{ uint32_t f = c.bus->r16(c.a[7]); c.a[7] += 2; npc = c.bus->r32(c.a[7]); c.a[7] += 4; if (lift::set_sr(c, f)) return lift::Exit{npc, lift::Exit::Irq}; }']
     if f[0] == 'stop': return []
     raise ValueError(f)

@@ -224,8 +224,10 @@ def _decode(ctx, op, top, ins, code):
             if top == 8:
                 signed = bool(op & 0x100)
                 nxt = hx(ctx.pos)
-                body = (('int32_t dd = int32_t(c.d[%d]); int32_t dv = int16_t(%s); int64_t q = dd / dv; int32_t r = dd %% dv; ' % (r9, s) +
-                         'if (q > 32767 || q < -32768) { c.v = true; } else { c.d[%d] = (uint32_t(uint16_t(r)) << 16) | uint16_t(q); c.n = q < 0; c.z = q == 0; c.v = false; c.c = false; }' % r9)
+                # $80000000 / -1 overflows int32 (UB); Musashi special-cases it: d = 0, Z set, N/V/C clear
+                body = (('if (c.d[%d] == 0x80000000u && int16_t(%s) == -1) { c.d[%d] = 0; c.n = false; c.z = true; c.v = false; c.c = false; } else { ' % (r9, s, r9) +
+                         'int32_t dd = int32_t(c.d[%d]); int32_t dv = int16_t(%s); int64_t q = dd / dv; int32_t r = dd %% dv; ' % (r9, s) +
+                         'if (q > 32767 || q < -32768) { c.v = true; } else { c.d[%d] = (uint32_t(uint16_t(r)) << 16) | uint16_t(q); c.n = q < 0; c.z = q == 0; c.v = false; c.c = false; } }' % r9)
                         if signed else
                         ('uint32_t dd = c.d[%d]; uint32_t dv = %s & 0xFFFF; uint32_t q = dd / dv; uint32_t r = dd %% dv; ' % (r9, s) +
                          'if (q > 0xFFFF) { c.v = true; } else { c.d[%d] = (r << 16) | q; c.n = q & 0x8000; c.z = q == 0; c.v = false; c.c = false; }' % r9))
@@ -377,12 +379,15 @@ def _group0(ctx, op, ins, code):
     B = SZ[sz]
     if B == 4: imm = ctx.ext32()
     else: imm = ctx.ext() & (0xFF if B == 1 else 0xFFFF)
-    if mode == 7 and reg == 4:  # to ccr / sr
+    if mode == 7 and reg == 4:  # ori/andi/eori to ccr (byte) or sr (word)
         if B == 4 or kind in (2, 3, 6): raise Unsupported('imm to imm')
-        if kind == 0: code.append('c.set_ccr(c.ccr() | %s);' % hx(imm & 0x1F)) if B == 1 else code.append('c.set_ccr(c.ccr() | %s); c.sr_sys |= %s;' % (hx(imm & 0x1F), hx(imm & 0xA700)))
-        elif kind == 1: code.append('c.set_ccr(c.ccr() & %s);' % hx(imm & 0x1F)) if B == 1 else code.append('c.set_ccr(c.ccr() & %s); c.sr_sys &= %s;' % (hx(imm & 0x1F), hx(imm & 0xA700)))
-        elif kind == 5: code.append('c.set_ccr(c.ccr() ^ %s);' % hx(imm & 0x1F))
-        else: raise Unsupported('imm to ccr kind')
+        opx = {0: '|', 1: '&', 5: '^'}[kind]
+        if B == 1:
+            code.append('c.set_ccr(c.ccr() %s %s);' % (opx, hx(imm & 0x1F)))
+            return
+        code.append(PRIV % hx(ctx.pc))
+        code.append('if (lift::set_sr(c, (c.sr_sys | c.ccr()) %s %s)) return lift::Exit{%s, lift::Exit::Irq};' % (opx, hx(imm), hx(ctx.pos)))
+        ins.sr_write = True
         return
     check(mode, reg, 'alt')
     ea = Operand(ctx, code, mode, reg, B)
@@ -416,8 +421,8 @@ def _group4(ctx, op, ins, code):
     if op == 0x4E71: return
     if op == 0x4E75:
         ins.flow = ('ret',); return
-    if op == 0x4E73:
-        ins.flow = ('rte',); return
+    if op == 0x4E73:  # rte: code in emit.flow_code
+        ins.flow = ('rte',); ins.sr_write = True; return
     if op == 0x4E77:
         code.append('{ uint32_t f = c.bus->r16(c.a[7]); c.a[7] += 2; c.set_ccr(f); uint32_t t = c.bus->r32(c.a[7]); c.a[7] += 4; tgt = t; }'); ins.flow = ('jump_dyn',); return
     if op == 0x4E72:  # stop #imm: set SR, then idle until an interrupt (an already deliverable one exits with Exit::Irq)
@@ -470,8 +475,12 @@ def _group4(ctx, op, ins, code):
         ea = Operand(ctx, code, mode, reg, 2); code.append(ea.write('(c.sr_sys | c.ccr())')); return
     if (op & 0xFFC0) == 0x44C0:  # move to ccr
         ea = Operand(ctx, code, mode, reg, 2); code.append('c.set_ccr(%s);' % ea.read()); return
-    if (op & 0xFFC0) == 0x46C0:  # move to sr
-        ea = Operand(ctx, code, mode, reg, 2); v = ctx.t(); code.append('uint32_t %s = %s; c.set_ccr(%s); c.sr_sys = %s & 0xA700;' % (v, ea.read(), v, v)); return
+    if (op & 0xFFC0) == 0x46C0:  # move to sr: the privilege check comes before the EA's side effects ((sp)+)
+        check(mode, reg, 'data')
+        code.append(PRIV % hx(pc))
+        ea = Operand(ctx, code, mode, reg, 2); v = ctx.t()
+        code.append('uint32_t %s = %s; if (lift::set_sr(c, %s)) return lift::Exit{%s, lift::Exit::Irq};' % (v, ea.read(), v, hx(ctx.pos)))
+        ins.sr_write = True; return
     sz = (op >> 6) & 3
     h = op & 0xFF00
     if h in (0x4200, 0x4400, 0x4000, 0x4600, 0x4A00) and sz != 3:

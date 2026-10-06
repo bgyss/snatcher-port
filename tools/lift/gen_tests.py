@@ -16,7 +16,13 @@ SYNTHETIC = [
     *['%04X' % (0x4E40 + n) for n in range(16)],            # trap #0..#15
     '4181', '4190', '45BC0010',                            # chk.w d1,d0 / (a0),d0 / #$10,d2
     '80FC0000', '83FC0000', '80C1',                        # divu #0,d0 / divs #0,d1 / divu d1,d0
+    '83FCFFFF', '81C1',                                    # divs #-1,d1 / divs d1,d0 (lift_diff seeds $80000000 / -1)
     '4E722000', '4E722700', '4E720000',                    # stop #$2000 / #$2700 / #$0000 (to user mode)
+    '4E73',                                                # rte
+    '46FC2000', '46FC2700', '46FC0000',                    # move #imm,sr (#$0000: to user mode, unmasked)
+    '46DF', '46C0', '46D0',                                # move (sp)+,sr / d0,sr / (a0),sr
+    '027CF8FF', '027CDFFF', '007C0700', '007C2000',        # andi/ori #imm,sr ($DFFF: to user mode)
+    '0A7C0700', '0A7C2000',                                # eori #imm,sr
 ]
 SYN_PC = 0x00F000
 
@@ -48,7 +54,7 @@ def main():
         while pc < min(end, base + len(data) - 2):
             ins = decode(r16, pc)
             key = bytes(data[pc - base:pc - base + ins.size]) + (b'%d' % pc if ins.flow != 'next' else b'')
-            if key not in seen and ins.flow != ('rte',) and data[pc - base:pc - base + 2][0] != 0x46 and 'unsupported' not in (ins.code[0] if ins.code else ''):
+            if key not in seen and 'unsupported' not in (ins.code[0] if ins.code else ''):
                 seen.add(key); cases.append((ins, bytes(data[pc - base:pc - base + ins.size])))
             pc += ins.size
     random.Random(1).shuffle(cases); cases = cases[:cap] + synthetic_cases()

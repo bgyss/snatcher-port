@@ -154,6 +154,10 @@ int main(int argc, char** argv) {
                 c.a[i] = av;
             }
             c.a[7] = 0x800000 + (rnd() & 0xFFF) * 2;
+            if ((op & 0xF1C0) == 0x81C0 && t % 4 == 3) {   // divs: $80000000 / -1, Musashi's special case (d = 0)
+                c.d[(op >> 9) & 7] = 0x80000000u;
+                if ((op & 0x38) == 0 && (op & 7) != ((op >> 9) & 7)) c.d[op & 7] = 0xFFFFu;
+            }
             c.set_ccr(rnd() & 0x1F);
             int ipl = 0;
             if (k.kind) {   // either mode, interrupts masked on entry, a pending level 0..6 (an SR write may unmask it)
