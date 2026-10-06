@@ -9,6 +9,7 @@
 
 extern "C" {
 #include "m68k.h"
+int scd_musashi_take_stop(void);   // musashi_stop.c: clears Musashi's stop state, returns whether it was set
 }
 #ifdef SNATCHER_TRANSLATED
 #include "cpu68k.h"
@@ -508,10 +509,16 @@ int System::run_sub_translated(int cycles) {
     int32_t budget = cycles;
     bool force_one = false;           // after an entry: run exactly the handler's first instruction before the next check
     while (budget > 0 || force_one) {
+        // A `stop` Musashi executed (fallback step, verify replay) parks the CPU here, in stopped_, as a translated one does:
+        // the host takes interrupts, and a stop left set in Musashi would keep it from running the handler.
+        if (scd_musashi_take_stop()) stopped_[kSub] = true;
         const LoopStep step = loop_step(force_one, stopped_[kSub], cpu_irq_[kSub], reg_get(M68K_REG_SR));
         if (step == LoopStep::kDeliver) {
             lift_load(c);
             lift_store(c, take_irq(c, cpu_irq_[kSub], reg_get(M68K_REG_PC), budget));
+            // The forced handler-first-instruction step cannot miss a higher level: the acknowledge only clears sources, so
+            // cpu_irq_ can only drop; the mask is now the delivered level; nothing between here and that step advances time or
+            // raises a source. (NMI, level 7, is not used: no source raises it.)
             force_one = true;
             continue;
         }
@@ -600,11 +607,12 @@ int System::run_main_translated(int cycles) {
     main_budget_ = &budget;           // VDP DMA stalls are charged here, also during a single handler instruction
     bool force_one = false;
     while (budget > 0 || force_one) {
+        if (scd_musashi_take_stop()) stopped_[kMain] = true;   // a `stop` Musashi executed (see run_sub_translated)
         const LoopStep step = loop_step(force_one, stopped_[kMain], cpu_irq_[kMain], reg_get(M68K_REG_SR));
         if (step == LoopStep::kDeliver) {
             lift_load(c);
             lift_store(c, take_irq(c, cpu_irq_[kMain], reg_get(M68K_REG_PC), budget));   // vectors through main_read16 ($70: Gate Array H-INT vector)
-            force_one = true;
+            force_one = true;   // no higher level can be pending before that step (see run_sub_translated)
             continue;
         }
         if (step == LoopStep::kIdle) { budget = 0; break; }

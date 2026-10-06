@@ -26,7 +26,8 @@ else()
     WORKING_DIRECTORY ${MUSASHI_GEN})
 endif()
 add_library(musashi STATIC
-  ${MUSASHI}/m68kcpu.c ${MUSASHI_GEN}/m68kops.c ${MUSASHI}/softfloat/softfloat.c)
+  ${MUSASHI}/m68kcpu.c ${MUSASHI_GEN}/m68kops.c ${MUSASHI}/softfloat/softfloat.c
+  src/scd/musashi_stop.c)   # local: Musashi's stop state for the translated run loops (ADR-003 M2)
 target_include_directories(musashi PUBLIC ${MUSASHI} PRIVATE ${MUSASHI_GEN})
 target_compile_options(musashi PRIVATE
   $<$<NOT:$<C_COMPILER_ID:MSVC>>:-w>)

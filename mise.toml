@@ -86,6 +86,7 @@ run = [
   "engine/build-interp/translate_entry_test",
   "python tools/lift/test_coverage_report.py",
   "python tools/lift/test_gen_program.py",
+  "python tools/lift/test_m68k_decode.py",
   "SCD_HEADLESS_INTERP=engine/build-interp/scd_headless python tools/lift/test_coverage.py",
 ]
 

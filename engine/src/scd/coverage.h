@@ -19,7 +19,7 @@ enum class Fallback : uint8_t {
     kCodeMismatch,    // a program covers it, but the bytes in memory differ from what was translated
     kIrqEntry,        // an interrupt is pending: Musashi takes the exception (translated code runs only with IRQs masked)
     kHleStub,         // a BIOS HLE trap stub or the rts after it
-    kUnsupported,     // translated code stopped at an instruction it does not implement (rte, trap, stop, chk, ...)
+    kUnsupported,     // translated code stopped at an instruction it does not implement (rte, a privileged one in user mode, ...)
     kCount
 };
 

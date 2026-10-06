@@ -189,6 +189,19 @@ class TestRangeExit(Base):
         kind, pc, d0 = self.run_prog("sub_translated.cpp", "sub", 0x602A)
         self.assertEqual((kind, pc, d0), (5, 0x123456, 2))
 
+    def test_trap_is_translated_and_descent_continues(self):
+        # $28000: trap #0 ; moveq #1,d0 ; rts. The handler returns to $28002, so it is decoded too.
+        d = self.code / "overlays"
+        d.mkdir()
+        (d / "ovl_0000c0de.bin").write_bytes(bytes.fromhex("4E4070014E75") + bytes(0x100))
+        self.seeds("ovl_0000c0de", 0x28000)
+        self.gen("ovl:overlays/ovl_0000c0de.bin")
+        cpp = (self.out / "ovl_0000c0de_translated.cpp").read_text()
+        self.assertIn("case 0x28002:", cpp)
+        self.assertIn("budget -= int32_t(c.exc_cycles) - m68ki_cycles[0][0x4E40];", cpp)
+        kind, pc, d0 = self.run_prog("ovl_0000c0de_translated.cpp", "ovl_0000c0de", 0x28000)
+        self.assertEqual((kind, pc, d0), (5, 0x0, 0))   # vector 32 is 0 in the harness: NotTranslated at the handler
+
 
 if __name__ == "__main__":
     unittest.main()

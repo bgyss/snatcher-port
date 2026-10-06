@@ -12,7 +12,12 @@ BLOBS = [('extracted/code/scd_subcode.bin', 0xD400, 0x16300), ('extracted/code/s
 
 
 # Generic 68000 encodings (not disc-derived), always tested whatever the disc contains (ADR-003 M2).
-SYNTHETIC = []
+SYNTHETIC = [
+    *['%04X' % (0x4E40 + n) for n in range(16)],            # trap #0..#15
+    '4181', '4190', '45BC0010',                            # chk.w d1,d0 / (a0),d0 / #$10,d2
+    '80FC0000', '83FC0000', '80C1',                        # divu #0,d0 / divs #0,d1 / divu d1,d0
+    '4E722000', '4E722700', '4E720000',                    # stop #$2000 / #$2700 / #$0000 (to user mode)
+]
 SYN_PC = 0x00F000
 
 

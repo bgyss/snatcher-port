@@ -140,7 +140,7 @@ def main():
                 # dbcc target is encoded in code as constant: re-derive
                 m = re.search(r'npc = (0x[0-9A-F]+); \}', ' '.join(ins.code))
                 if m: work.append(int(m.group(1), 16))
-            if f in ('next', ('self',)) or (isinstance(f, tuple) and f[0] in ('cond', 'call', 'call_dyn')):
+            if f in ('next', ('self',)) or (isinstance(f, tuple) and f[0] in ('cond', 'call', 'call_dyn', 'exc')):
                 pc = nxt; continue
             break
     # pc-relative jump tables: scan decoded insns for 'jmp d(pc,dN)' preceded by move.w d(pc,dN),dN (offset table)
@@ -180,7 +180,7 @@ def main():
                 if f == ('self',):
                     m = re.search(r'npc = (0x[0-9A-F]+); \}', ' '.join(ins.code))
                     if m: work.append(int(m.group(1), 16))
-                if f in ('next', ('self',)) or (isinstance(f, tuple) and f[0] in ('cond', 'call', 'call_dyn')):
+                if f in ('next', ('self',)) or (isinstance(f, tuple) and f[0] in ('cond', 'call', 'call_dyn', 'exc')):
                     pc = nxt; continue
                 break
             changed = True
@@ -219,6 +219,8 @@ def main():
         if ins.code and ins.code[0].startswith('/* unsupported'):
             out.append('            return Exit{0x%X, Exit::Unsupported};\n        }' % pc); continue
         for line in ins.code + flow_code(ins): out.append('            ' + line)
+        if ins.flow == ('exc',):   # an exception the instruction raised costs exc_cycles(vector) in all (ADR-003 M2)
+            out.append('            if (c.exc_cycles) { budget -= int32_t(c.exc_cycles) - m68ki_cycles[0][0x%04X]; c.exc_cycles = 0; }' % op)
         nxt = pc + ins.size
         if ins.flow == 'next' and nxt in insns and i + 1 < len(order) and order[i + 1] == nxt:
             out.append('            if (budget <= 0) return Exit{0x%X, Exit::Budget};' % nxt)

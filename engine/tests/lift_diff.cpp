@@ -195,5 +195,6 @@ int main(int argc, char** argv) {
     const int irq_fails = irq_trials(bus, 2000, irq_checked);
     std::printf("checked %d samples (plain %d, sr writes %d, exceptions %d), interrupt entries %d, skipped %d, failing cases %d of %zu, failing interrupt entries %d\n",
                 checked, by_kind[0], by_kind[1], by_kind[2], irq_checked, skipped, fails, ncases, irq_fails);
+    if (by_kind[1] == 0 || by_kind[2] == 0) { std::printf("FAIL: no SR-write or exception samples were checked\n"); return 1; }
     return fails || irq_fails ? 1 : 0;
 }
