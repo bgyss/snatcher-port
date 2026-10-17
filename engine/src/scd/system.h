@@ -82,7 +82,9 @@ public:
     uint16_t e020() const { return uint16_t(main_ram_[0xE020] << 8 | main_ram_[0xE021]); }
     uint16_t e022() const { return uint16_t(main_ram_[0xE022] << 8 | main_ram_[0xE023]); }
     uint16_t e06c() const { return uint16_t(main_ram_[0xE06C] << 8 | main_ram_[0xE06D]); }
-    // Prints PCs and key registers of both CPUs, the CD state and the PCM channels to the log.
+    // PCs and key registers of both CPUs, the CD state and the PCM channels (state.txt in markers and failure bundles).
+    std::string state_text();
+    // Prints state_text() to the log.
     void dump_state();
     // Debug log file (SNATCHER_LOG / --log): everything log() prints plus CD loads, CD-DA, input changes, game-state
     // changes, a heartbeat every ~5 s and a "no change for 30 s" notice. Truncates the file.

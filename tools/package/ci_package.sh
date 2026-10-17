@@ -27,6 +27,7 @@ fi
 # Disc-free tests (the end-to-end ones skip without a disc).
 "$BUILD/replay_test"
 "$BUILD/watchdog_test"
+"$BUILD/checkpoint_test"
 SCD_HEADLESS="$PWD/$BUILD/scd_headless" "${PYTHON:-python3}" tools/playtest/test_playtest.py
 
 [ "$PLATFORM" = mac ] && { echo "packaged $OUT/Snatcher-mac.zip"; exit 0; }   # mac_app.sh already ran its translated-code guard

@@ -37,7 +37,8 @@ target_include_directories(nuked_opn2 PUBLIC third_party/nuked-opn2)
 
 # ---- Core (no platform dependencies)
 add_library(scdcore STATIC
-  src/scd/disc.cpp src/scd/vdp.cpp src/scd/pcm.cpp src/scd/psg.cpp src/scd/system.cpp src/scd/replay.cpp)
+  src/scd/disc.cpp src/scd/vdp.cpp src/scd/pcm.cpp src/scd/psg.cpp src/scd/system.cpp src/scd/replay.cpp
+  src/scd/checkpoint.cpp src/scd/debug_dump.cpp)
 target_include_directories(scdcore PUBLIC src/scd src/lift)
 
 # Optional: build-time translation of the Sub CPU program from the user's own disc blobs
@@ -84,6 +85,9 @@ target_link_libraries(replay_test PRIVATE scdcore)
 
 add_executable(watchdog_test tests/watchdog_test.cpp)
 target_include_directories(watchdog_test PRIVATE src/scd)
+
+add_executable(checkpoint_test tests/checkpoint_test.cpp)
+target_link_libraries(checkpoint_test PRIVATE scdcore)
 
 add_executable(coverage_test tests/coverage_test.cpp)
 target_include_directories(coverage_test PRIVATE src/scd)

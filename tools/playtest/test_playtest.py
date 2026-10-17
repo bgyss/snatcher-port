@@ -139,8 +139,9 @@ class TestWatch(unittest.TestCase):
         # SCD_TEST_STICK_E020 pins the sampled frame counter from frame 20, a synthetic hang.
         r = run_headless("--frames", "100", "--out", str(out), "--watch", "--hang-frames", "30", env={"SCD_TEST_STICK_E020": "20"})
         self.assertEqual(r.returncode, 3, r.stderr)
-        for name in ("report.json", "final.ppm", "mainram.bin", "subram.bin", "repro.replay"):
+        for name in ("report.json", "final.ppm", "mainram.bin", "subram.bin", "repro.replay", "state.txt"):
             self.assertTrue((out / name).exists(), name)
+        self.assertTrue((out / "state.txt").read_text().startswith("Main PC="))
         import json
         rep = json.loads((out / "report.json").read_text())
         self.assertEqual(rep["kind"], "hang")

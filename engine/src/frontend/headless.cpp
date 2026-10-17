@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "checkpoint.h"
+#include "debug_dump.h"
 #include "recorder.h"
 #include "replay.h"
 #include "system.h"
@@ -20,19 +22,6 @@
 using namespace scd;
 
 namespace {
-
-void write_ppm(const std::string& path, const uint32_t* fb, int w, int h) {
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return;
-    std::fprintf(f, "P6\n%d %d\n255\n", w, h);
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            uint32_t p = fb[y * 320 + x];
-            unsigned char rgb[3] = {uint8_t(p >> 16), uint8_t(p >> 8), uint8_t(p)};
-            std::fwrite(rgb, 1, 3, f);
-        }
-    std::fclose(f);
-}
 
 void write_wav(const std::string& path, const std::vector<int16_t>& s) {
     FILE* f = std::fopen(path.c_str(), "wb");
@@ -60,24 +49,6 @@ uint16_t parse_buttons(const std::string& s) {
         case 'A': b |= kA; break; case 'S': b |= kStart; break;
     }
     return b;
-}
-
-// Everything needed to look at a watchdog trip later: what tripped, both CPUs' PCs, the screen, RAM, and the input that got here.
-void write_failure_bundle(System& sys, const std::string& out, const Replay& trace, const WatchVerdict& v) {
-    uint32_t mpc, spc;
-    sys.cpu_pcs(&mpc, &spc);
-    const char* kind = v.kind == WatchVerdict::kHang ? "hang" : "halted";
-    if (FILE* f = std::fopen((out + "/report.json").c_str(), "w")) {
-        std::fprintf(f, "{\"kind\":\"%s\",\"frame\":%llu,\"since\":%llu,\"e020\":\"0x%04x\",\"e022\":\"0x%04x\",\"e06c\":\"0x%04x\",\"main_pc\":\"0x%06x\",\"sub_pc\":\"0x%06x\"}\n",
-                     kind, (unsigned long long)sys.frame_count(), (unsigned long long)v.since, sys.e020(), sys.e022(), sys.e06c(), mpc, spc);
-        std::fclose(f);
-    }
-    write_ppm(out + "/final.ppm", sys.framebuffer(), sys.width(), sys.height());
-    if (FILE* f = std::fopen((out + "/mainram.bin").c_str(), "wb")) { std::fwrite(sys.main_ram(), 1, 0x10000, f); std::fclose(f); }
-    if (FILE* f = std::fopen((out + "/subram.bin").c_str(), "wb")) { std::fwrite(sys.prg_ram() + 0x7000, 1, 0x6000, f); std::fclose(f); }
-    if (FILE* f = std::fopen((out + "/repro.replay").c_str(), "w")) { std::fputs(trace.serialize().c_str(), f); std::fclose(f); }
-    sys.dump_state();
-    std::fprintf(stderr, "[watch] %s at frame %llu (e020=%04x main_pc=%06x sub_pc=%06x); bundle in %s\n", kind, (unsigned long long)sys.frame_count(), sys.e020(), mpc, spc, out.c_str());
 }
 
 }  // namespace
@@ -168,16 +139,8 @@ int main(int argc, char** argv) {
         sys.set_replay_record(&trace);
     }
     FILE* ckpt = nullptr;
-    uint16_t last22 = 0xFFFF, last6c = 0xFFFF;
     if (!ckpt_path.empty() && !(ckpt = std::fopen(ckpt_path.c_str(), "w"))) { std::fprintf(stderr, "error: cannot open %s\n", ckpt_path.c_str()); return 1; }
-    uint64_t last_emitted = ~0ull;
-    auto emit_ckpt = [&]() {
-        if (sys.frame_count() == last_emitted) return;   // the backstop and the exit line can land on the same frame
-        last_emitted = sys.frame_count();
-        StateHash h = sys.state_hash();
-        std::fprintf(ckpt, "@0x%llx scene=E022:%04x/E06C:%04x vram=%016llx ram=%016llx fb=%016llx\n", (unsigned long long)sys.frame_count(),
-                     sys.e022(), sys.e06c(), (unsigned long long)h.vram, (unsigned long long)h.ram, (unsigned long long)h.fb);
-    };
+    Checkpointer ckpts(ckpt_every);
 
     const int profile_from = std::getenv("SCD_PROFILE") ? std::atoi(std::getenv("SCD_PROFILE")) : -1;
     const char* coverage_path = std::getenv("SCD_COVERAGE");   // ADR-003 fallback census, written on every exit (watchdog trips included)
@@ -224,18 +187,14 @@ int main(int argc, char** argv) {
             WatchVerdict v = dog.feed({sys.frame_count(), e20, sys.state_hash().fb, sys.halted()});
             if (v.kind == WatchVerdict::kStillScreen) std::fprintf(stderr, "[watch] warning: screen unchanged since frame %llu\n", (unsigned long long)v.since);
             else if (v.kind != WatchVerdict::kOk) {
-                if (ckpt) { emit_ckpt(); std::fclose(ckpt); }
+                if (ckpt) { std::fputs(ckpts.final_line(sys).c_str(), ckpt); std::fclose(ckpt); }
                 write_census();
                 write_failure_bundle(sys, out, trace, v);
                 sys.shutdown();
                 return 3;
             }
         }
-        if (ckpt) {
-            bool changed = sys.e022() != last22 || sys.e06c() != last6c;
-            if (changed || (ckpt_every > 0 && sys.frame_count() % ckpt_every == 0)) emit_ckpt();
-            last22 = sys.e022(); last6c = sys.e06c();
-        }
+        if (ckpt) std::fputs(ckpts.after_frame(sys).c_str(), ckpt);
         if (!wav.empty()) {
             all_audio.insert(all_audio.end(), sys.audio().begin(), sys.audio().end());
         }
@@ -286,7 +245,7 @@ int main(int argc, char** argv) {
             write_ppm(out + name, sys.framebuffer(), sys.width(), sys.height());
         }
     }
-    if (ckpt) { emit_ckpt(); std::fclose(ckpt); }
+    if (ckpt) { std::fputs(ckpts.final_line(sys).c_str(), ckpt); std::fclose(ckpt); }
     if (frametime && !ft.empty()) {
         double sum = 0; int over = 0;
         for (auto& [ms, fr] : ft) { sum += ms; over += ms > 1000.0 / 59.9227; }

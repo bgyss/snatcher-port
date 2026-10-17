@@ -1521,22 +1521,36 @@ bool System::bram_selftest() {
     return ok;
 }
 
-void System::dump_state() {
+static void appendf(std::string& s, const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = std::vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n > 0) s.append(buf, size_t(std::min(n, int(sizeof buf) - 1)));
+}
+
+std::string System::state_text() {
+    std::string s;
     Cpu keep = cur_;
     for (int i = 0; i < 2; ++i) {
         select_cpu(Cpu(i));
-        log("%s PC=%06x SR=%04x SP=%06x D0=%08x A0=%08x A6=%08x\n", i ? "Sub " : "Main", reg_get(M68K_REG_PC) & 0xFFFFFF,
-            reg_get(M68K_REG_SR), reg_get(M68K_REG_SP) & 0xFFFFFF, reg_get(M68K_REG_D0), reg_get(M68K_REG_A0), reg_get(M68K_REG_A6));
+        appendf(s, "%s PC=%06x SR=%04x SP=%06x D0=%08x A0=%08x A6=%08x\n", i ? "Sub " : "Main", reg_get(M68K_REG_PC) & 0xFFFFFF,
+                reg_get(M68K_REG_SR), reg_get(M68K_REG_SP) & 0xFFFFFF, reg_get(M68K_REG_D0), reg_get(M68K_REG_A0), reg_get(M68K_REG_A6));
     }
     select_cpu(keep);
-    log("VDP regs:");
-    for (int i = 0; i < 24; ++i) log(" %02x", vdp_.reg(i));
-    log("  ffef02=%02x%02x\n", main_ram_[0xef02], main_ram_[0xef03]);
-    log("sub_run=%d owner=%d mode1m=%d main_flag=%02x sub_flag=%02x int_mask=%04x ien2=%d prg_bank=%d\n", sub_run_, word_owner_, mode_1m_,
-        main_flag_, sub_flag_, int_mask_, ien2_, prg_bank_);
-    log("CD: reading=%d lba=%u remaining=%u buf_valid=%d cdda=%d track=%d reads=%llu\n", cdc_reading_, cdc_lba_, cdc_remaining_, cdc_buf_valid_, cdda_playing_, cdda_track_, (unsigned long long)cd_reads_);
-    log("%s", pcm_.describe().c_str());
+    appendf(s, "VDP regs:");
+    for (int i = 0; i < 24; ++i) appendf(s, " %02x", vdp_.reg(i));
+    appendf(s, "  ffef02=%02x%02x\n", main_ram_[0xef02], main_ram_[0xef03]);
+    appendf(s, "sub_run=%d owner=%d mode1m=%d main_flag=%02x sub_flag=%02x int_mask=%04x ien2=%d prg_bank=%d\n", sub_run_, word_owner_, mode_1m_,
+            main_flag_, sub_flag_, int_mask_, ien2_, prg_bank_);
+    appendf(s, "CD: reading=%d lba=%u remaining=%u buf_valid=%d cdda=%d track=%d reads=%llu\n", cdc_reading_, cdc_lba_, cdc_remaining_, cdc_buf_valid_,
+            cdda_playing_, cdda_track_, (unsigned long long)cd_reads_);
+    s += pcm_.describe();
+    return s;
 }
+
+void System::dump_state() { log("%s", state_text().c_str()); }
 
 bool System::open_log(const std::string& path) {
     close_log();

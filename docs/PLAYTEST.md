@@ -43,7 +43,7 @@ All hashes are FNV-1a. `fb` is the framebuffer, `vram` is VRAM+CRAM+VSRAM+VDP re
 
 ## Watchdog
 
-`scd_headless --watch [--hang-frames N]` checks every frame: `$E020` unchanged for N frames (default 300) is a hang; a halted CPU (unexpected illegal opcode) is a crash; an identical framebuffer for 1800 frames is a warning only (static screens are legitimate). On a hang or crash it exits 3 and writes into `--out`: `report.json` (kind, frame, `$E020/$E022/$E06C`, both PCs), `final.ppm`, `mainram.bin`, `subram.bin`, `repro.replay` (the input that led there), and logs `dump_state()`.
+`scd_headless --watch [--hang-frames N]` checks every frame: `$E020` unchanged for N frames (default 300) is a hang; a halted CPU (unexpected illegal opcode) is a crash; an identical framebuffer for 1800 frames is a warning only (static screens are legitimate). On a hang or crash it exits 3 and writes into `--out`: `report.json` (kind, frame, `$E020/$E022/$E06C`, both PCs), `final.ppm`, `mainram.bin`, `subram.bin`, `repro.replay` (the input that led there), `state.txt` (both CPUs, VDP, CD and PCM state), and logs the same state.
 
 `SCD_TEST_STICK_E020=<frame>` pins the sampled `$E020` from that frame on (a synthetic hang for tests; the emulation is untouched).
 
