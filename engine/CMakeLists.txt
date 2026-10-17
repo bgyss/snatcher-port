@@ -76,9 +76,24 @@ if(SNATCHER_TRANSLATE_DIR)
 endif()
 target_link_libraries(scdcore PUBLIC musashi nuked_opn2)
 
+# ---- Build stamp: the git commit in session manifests. Runs on every build; the header changes only with the commit or dirty state.
+find_package(Git QUIET)
+set(STAMP_DIR ${CMAKE_CURRENT_BINARY_DIR}/stamp)
+add_custom_target(build_stamp
+  COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/.. -DOUT=${STAMP_DIR}/build_stamp.h "-DGIT=${GIT_EXECUTABLE}"
+          -DBUILD_TYPE=${CMAKE_BUILD_TYPE} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_stamp.cmake
+  BYPRODUCTS ${STAMP_DIR}/build_stamp.h
+  VERBATIM)
+
+# ---- Session recording (manifest, session folders): shared by scd_headless and the app (docs/PLAYTEST.md "Sessions").
+add_library(scdsession STATIC src/session/manifest.cpp)
+target_include_directories(scdsession PUBLIC src/session PRIVATE ${STAMP_DIR})
+target_link_libraries(scdsession PUBLIC scdcore)
+add_dependencies(scdsession build_stamp)
+
 # ---- Headless runner (tests, oracle captures)
 add_executable(scd_headless src/frontend/headless.cpp)
-target_link_libraries(scd_headless PRIVATE scdcore)
+target_link_libraries(scd_headless PRIVATE scdcore scdsession)
 
 add_executable(replay_test tests/replay_test.cpp)
 target_link_libraries(replay_test PRIVATE scdcore)
@@ -88,6 +103,9 @@ target_include_directories(watchdog_test PRIVATE src/scd)
 
 add_executable(checkpoint_test tests/checkpoint_test.cpp)
 target_link_libraries(checkpoint_test PRIVATE scdcore)
+
+add_executable(session_test tests/session_test.cpp)
+target_link_libraries(session_test PRIVATE scdsession)
 
 add_executable(coverage_test tests/coverage_test.cpp)
 target_include_directories(coverage_test PRIVATE src/scd)

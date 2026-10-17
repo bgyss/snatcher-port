@@ -92,6 +92,7 @@ public:
     void close_log();
     // 1x = a real drive (75 sectors/s, 0.3 s seeks); higher is faster. Set before init().
     void set_cd_speed(double x) { cd_speed_ = x < 1.0 ? 1.0 : x; }
+    double cd_speed() const { return cd_speed_; }
     bool bram_selftest();
     void enable_profile(bool on) { profile_ = on; pc_hist_[0].clear(); pc_hist_[1].clear(); }
     void dump_profile(int top);

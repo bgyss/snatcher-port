@@ -1,4 +1,4 @@
-import os, subprocess, sys, unittest, pathlib
+import json, os, re, shutil, subprocess, sys, tempfile, unittest, pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CUE = ROOT / "sega-cd-eng" / "Snatcher (Sega CD) (U)-redump.cue"
@@ -11,6 +11,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 def run_headless(*args, env=None):
     e = dict(os.environ, **(env or {}))
     return subprocess.run([HEADLESS, str(CUE), *args], capture_output=True, text=True, env=e)
+
+
+def new_dir(prefix):
+    (ROOT / "work").mkdir(exist_ok=True)
+    return pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=ROOT / "work"))
 
 
 class TestCheckpoints(unittest.TestCase):
@@ -153,6 +158,27 @@ class TestWatch(unittest.TestCase):
         out.mkdir(parents=True, exist_ok=True)
         r = run_headless("--frames", "1200", "--out", str(out), "--watch")
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestManifest(unittest.TestCase):
+    @needs_disc
+    def test_manifest_identifies_build(self):
+        out = new_dir("pt_manifest_")
+        mf = out / "manifest.json"
+        r = run_headless("--frames", "60", "--out", str(out), "--manifest-out", str(mf), env={"SCD_NO_TRANSLATE": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        m = json.loads(mf.read_text())
+        self.assertEqual(m["format"], 1)
+        self.assertEqual(m["app"], "scd_headless")
+        self.assertEqual(m["build"], "interpreter")   # SCD_NO_TRANSLATE: interpreter on either build kind
+        self.assertEqual(m["frames"], 60)
+        self.assertEqual(m["exit"], "quit")
+        self.assertIsNone(m["sdl"])
+        self.assertEqual(m["bram_sha1"], "none")
+        self.assertIsInstance(m["git_dirty"], bool)
+        head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
+        if head.returncode == 0:   # built from this checkout (and not committed since the build)
+            self.assertEqual(m["git_commit"], head.stdout.strip())
 
 
 A = "@0x64 scene=E022:0003/E06C:0000 vram=1 ram=2 fb=3\n@0xc8 scene=E022:0003/E06C:0001 vram=4 ram=5 fb=6\n"

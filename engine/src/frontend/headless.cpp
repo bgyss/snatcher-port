@@ -1,6 +1,6 @@
 // Headless runner: boots a disc for N frames, optionally dumping frames and audio.
 //   scd_headless <disc.cue> [--frames N] [--ppm-every N --out DIR] [--wav out.wav] [--video out.mp4]
-//                [--press FRAME:BUTTONS:HOLD ...] [--replay FILE [--bram FILE]] [--ckpt-out FILE [--ckpt-every N]] [--watch [--hang-frames N]]
+//                [--press FRAME:BUTTONS:HOLD ...] [--replay FILE [--bram FILE]] [--ckpt-out FILE [--ckpt-every N]] [--manifest-out FILE] [--watch [--hang-frames N]]
 //                [--justifier [--gun FRAME:X,Y,in|out,T|S|TS|- ...]]   (gun state from FRAME on, entries in frame order)
 // --video writes a 1440x1080 AAC demo video of the run, H.264 or with --video-codec h265 H.265 (needs ffmpeg, see recorder.h).
 // BUTTONS is a string of U D L R B C A S. Output stays in the directory given by --out.
@@ -9,11 +9,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
 #include "checkpoint.h"
 #include "debug_dump.h"
+#include "manifest.h"
 #include "recorder.h"
 #include "replay.h"
 #include "system.h"
@@ -59,9 +61,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::string cue = argv[1], out = ".", wav, video, codec = "h264";
+    const std::string started = iso8601_local(std::time(nullptr));
     int frames = 600, ppm_every = 0, ckpt_every = 300, hang_frames = 300;
     bool watch = false, justifier = false;
-    std::string replay_path, ckpt_path, bram;
+    std::string replay_path, ckpt_path, bram, manifest_path;
     std::vector<Press> presses;
     std::vector<GunPress> guns;
     for (int i = 2; i < argc; ++i) {
@@ -76,6 +79,7 @@ int main(int argc, char** argv) {
         else if (a == "--ckpt-out" && i + 1 < argc) ckpt_path = argv[++i];
         else if (a == "--ckpt-every" && i + 1 < argc) ckpt_every = std::atoi(argv[++i]);
         else if (a == "--bram" && i + 1 < argc) bram = argv[++i];
+        else if (a == "--manifest-out" && i + 1 < argc) manifest_path = argv[++i];
         else if (a == "--watch") watch = true;
         else if (a == "--hang-frames" && i + 1 < argc) hang_frames = std::atoi(argv[++i]);
         else if (a == "--justifier") justifier = true;
@@ -280,6 +284,24 @@ int main(int argc, char** argv) {
         if (!rec.finish(&err)) std::fprintf(stderr, "error: %s\n", err.c_str());
     }
     std::printf("ran %llu frames%s\n", (unsigned long long)sys.frame_count(), sys.halted() ? " (halted)" : "");
+    if (!manifest_path.empty()) {   // run.py --session compares this build kind with the session's
+        Manifest m;
+        m.app = "scd_headless";
+        m.build = sys.translated() ? "translated" : "interpreter";
+        m.os = host_os();
+        for (int i = 2; i < argc; ++i) m.args.push_back(argv[i]);
+        m.cd_speed = sys.cd_speed();
+        m.justifier = justifier;
+        m.ckpt_every = ckpt_every;
+        m.disc_sha1 = disc_sha1_from_cue(cue);
+        m.bram_sha1 = bram_sha_at_start;
+        m.started = started;
+        m.ended = iso8601_local(std::time(nullptr));
+        m.has_frames = true;
+        m.frames = sys.frame_count();
+        m.exit = sys.halted() ? "halted" : "quit";
+        if (!write_text(manifest_path, manifest_json(m))) std::fprintf(stderr, "error: cannot write %s\n", manifest_path.c_str());
+    }
     write_census();
     sys.shutdown();
     return 0;

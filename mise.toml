@@ -67,10 +67,11 @@ run = "tools/macos/check_present.sh"
 description = "Playtest harness unit and end-to-end tests (replay format, watchdog, checkpoints, runner)"
 run = [
   "cmake -S engine -B engine/build-interp -DCMAKE_BUILD_TYPE=Release",
-  "cmake --build engine/build-interp -j --target scd_headless replay_test watchdog_test checkpoint_test",
+  "cmake --build engine/build-interp -j --target scd_headless replay_test watchdog_test checkpoint_test session_test",
   "engine/build-interp/replay_test",
   "engine/build-interp/watchdog_test",
   "engine/build-interp/checkpoint_test",
+  "engine/build-interp/session_test",
   "SCD_HEADLESS=engine/build-interp/scd_headless python tools/playtest/test_playtest.py",
 ]
 
