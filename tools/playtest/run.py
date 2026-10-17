@@ -32,6 +32,11 @@ def run_once(headless, cue, replay, frames, bram, out):
     return r.returncode, ckpt, r.stderr
 
 
+def complete_lines(text):
+    """Drop an unterminated last line (a session killed mid-write)."""
+    return text if text.endswith("\n") or not text else text[:text.rfind("\n") + 1]
+
+
 def verify_session(a):
     sdir = pathlib.Path(a.session)
     try:
@@ -44,7 +49,7 @@ def verify_session(a):
         print(f"error: {sdir} has no session.replay or session.ckpt")
         return 2
     try:
-        rec = ckpt_diff.parse(ckpt.read_text())
+        rec = ckpt_diff.parse(complete_lines(ckpt.read_text()))
     except ValueError as e:
         print(f"error: {ckpt}: {e}")
         return 2
@@ -59,6 +64,9 @@ def verify_session(a):
     out_ck, out_mf = work / "replay.ckpt", work / "replay_manifest.json"
     cmd = [a.headless, str(a.cue), "--frames", str(frames), "--out", str(work), "--replay", str(replay),
            "--ckpt-out", str(out_ck), "--ckpt-every", str(m.get("ckpt_every", 300)), "--manifest-out", str(out_mf)]
+    replay_copy = work / "session.replay"   # a killed session can end in a partial last line
+    replay_copy.write_text(complete_lines(replay.read_text()))
+    cmd[cmd.index("--replay") + 1] = str(replay_copy)
     bram = sdir / "session.replay.bram"
     if bram.exists():
         tmp = work / "bram.bin"

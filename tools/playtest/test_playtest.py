@@ -18,9 +18,11 @@ def new_dir(prefix):
     return pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=ROOT / "work"))
 
 
-# Synthetic play for session tests: two pad presses and Justifier moves / trigger and start pulls (frames 200..656).
+# Synthetic play for session tests: two pad presses and a Justifier held on-screen with trigger+start from frame 1 (the game only
+# reads it from ~0x3fb, so a short early pulse would change nothing), then moved and held with start. The game only reads the gun late and a final release
+# restores the no-gun state, so the gun must stay held to the end. A test checks it changes state.
 SYNTH = ("--press", "300:S:6", "--press", "500:C:6", "--justifier",
-         "--gun", "200:100,80,in,T", "--gun", "206:100,80,in,-", "--gun", "650:20,30,out,S", "--gun", "656:20,30,out,-")
+         "--gun", "1:150,100,in,TS", "--gun", "650:20,30,in,S")
 
 
 def record_session(frames, *extra, env=None, sdir=None):
@@ -142,10 +144,15 @@ class TestGun(unittest.TestCase):
         out.mkdir(parents=True, exist_ok=True)
         a, b, rp = out / "live.ckpt", out / "replayed.ckpt", out / "gun.replay"
         r = run_headless("--frames", "1200", "--out", str(out), "--ckpt-out", str(a), "--justifier",
-                         "--gun", "300:100,80,in,T", "--gun", "306:100,80,in,-", "--gun", "700:20,30,out,S", "--gun", "706:20,30,out,-")
+                         "--gun", "1:150,100,in,TS", "--gun", "700:20,30,in,S")
         self.assertEqual(r.returncode, 0, r.stderr)
+        # Negative control: the same run without gun events must differ, or this test proves nothing.
+        c = out / "nogun.ckpt"
+        r = run_headless("--frames", "1200", "--out", str(out), "--ckpt-out", str(c), "--justifier")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotEqual(a.read_text(), c.read_text(), "gun events do not change game state: test is vacuous")
         rp.write_text("# snatcher-replay v2\ndisc sha1=\nbram sha1=none\njustifier on\n"
-                      "g0x12c 100,80,in,T\ng0x132 100,80,in,-\ng0x2bc 20,30,out,S\ng0x2c2 20,30,out,-\n")
+                      "g0x1 150,100,in,TS\ng0x2bc 20,30,in,S\n")
         r = run_headless("--frames", "1200", "--out", str(out), "--ckpt-out", str(b), "--replay", str(rp))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(a.read_text(), b.read_text())
@@ -207,9 +214,11 @@ class TestManifest(unittest.TestCase):
         self.assertIsNone(m["sdl"])
         self.assertEqual(m["bram_sha1"], "none")
         self.assertIsInstance(m["git_dirty"], bool)
-        head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
-        if head.returncode == 0:   # built from this checkout (and not committed since the build)
-            self.assertEqual(m["git_commit"], head.stdout.strip())
+        c = m["git_commit"]
+        if c != "unknown" and subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--git-dir"], capture_output=True).returncode == 0:
+            # Built from this checkout, possibly before later commits: a real commit that is HEAD or an ancestor of it.
+            self.assertEqual(subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", c + "^{commit}"]).returncode, 0, c)
+            self.assertEqual(subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", c, "HEAD"]).returncode, 0, c)
 
 
 class TestSession(unittest.TestCase):
@@ -240,9 +249,18 @@ class TestSession(unittest.TestCase):
         text = (sdir / "session.replay").read_text()
         self.assertTrue(text.startswith("# snatcher-replay v2\n"))
         self.assertIn("justifier on\n", text)
-        for line in ("@0x12c S\n", "@0x132 -\n", "g0xc8 100,80,in,T\n", "g0x28a 20,30,out,S\n"):
+        for line in ("@0x12c S\n", "@0x132 -\n", "g0x1 150,100,in,TS\n", "g0x28a 20,30,in,S\n"):
             self.assertIn(line, text)
         self.assertIn("[user] marker 001 at frame 400", (sdir / "session.log").read_text())
+
+    @needs_disc
+    def test_synth_gun_events_change_state(self):
+        # Negative control: without it the session replay tests prove nothing about gun input.
+        r, sdir = record_session(1500, *SYNTH)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r2, sdir2 = record_session(1500, "--press", "300:S:6", "--press", "500:C:6", "--justifier")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertNotEqual((sdir / "session.ckpt").read_text(), (sdir2 / "session.ckpt").read_text())
 
     @needs_disc
     def test_session_replays_identically(self):
@@ -341,6 +359,18 @@ class TestSessionVerify(unittest.TestCase):
         self.assertEqual(v.returncode, 1, v.stdout + v.stderr)
         self.assertIn("DIVERGED", v.stdout)
         self.assertIn(f"'frame': {frame}", v.stdout)
+
+    @needs_disc
+    def test_partial_last_ckpt_line_ignored(self):
+        r, sdir = record_session(900)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(sdir / "session.ckpt", "a") as f:
+            f.write("@0x7ff scene=E022:00")   # killed mid-write: no newline
+        with open(sdir / "session.replay", "a") as f:
+            f.write("@0x7ff")
+        v = run_session_check(sdir)
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+        self.assertIn("session reproduces", v.stdout)
 
     @needs_disc
     def test_ram_only_difference_needs_strict(self):

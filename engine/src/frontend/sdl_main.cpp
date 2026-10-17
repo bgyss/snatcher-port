@@ -201,6 +201,10 @@ int main(int argc, char** argv) {
         if (dir.empty() || !s->begin(System::instance(), c, dir, &err)) {
             std::fprintf(stderr, "session: %s; playing without a session\n", err.c_str());
             if (want_log) open_debug_log();
+            if (!record_input.empty() && !record_input_written) {
+                std::fprintf(stderr, "warning: --record-input %s will not be written (no session)\n", record_input.c_str());
+                scd::debug_log("--record-input %s will not be written (no session)\n", record_input.c_str());
+            }
             return;
         }
         log_header(dir + "/session.log", cue);   // begin() already printed and logged the folder
@@ -398,6 +402,10 @@ int main(int argc, char** argv) {
     if (!encoders.empty()) std::fprintf(stderr, "finishing video encode...\n");
     for (auto& t : encoders) t.join();
     close_session("quit");   // after a CPU halt the session was already closed as "halted"
+    if (!record_input.empty() && !record_input_written) {
+        std::fprintf(stderr, "warning: --record-input %s was never written (no session ran); the file is empty\n", record_input.c_str());
+        scd::debug_log("--record-input %s was never written (no session ran)\n", record_input.c_str());
+    }
     if (running_game) System::instance().shutdown();
     System::instance().close_log();
     SDL_Quit();
