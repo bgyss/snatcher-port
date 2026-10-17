@@ -43,6 +43,12 @@ def ckpt_frame(line):
     return int(line.split()[0][3:], 16)
 
 
+def run_session_check(sdir, *extra, env=None):
+    e = dict(os.environ, **(env or {}))
+    return subprocess.run([sys.executable, str(pathlib.Path(__file__).parent / "run.py"), "--session", str(sdir), "--headless", HEADLESS,
+                           "--work", str(sdir.parent / "verify"), *extra], capture_output=True, text=True, env=e)
+
+
 class TestCheckpoints(unittest.TestCase):
     @needs_disc
     def test_two_runs_identical(self):
@@ -304,6 +310,79 @@ class TestSession(unittest.TestCase):
 
 
 A = "@0x64 scene=E022:0003/E06C:0000 vram=1 ram=2 fb=3\n@0xc8 scene=E022:0003/E06C:0001 vram=4 ram=5 fb=6\n"
+
+
+class TestSessionVerify(unittest.TestCase):
+    def test_missing_manifest_is_an_error(self):
+        d = new_dir("pt_nosession_")
+        r = run_session_check(d)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("manifest.json", r.stdout)
+
+    @needs_disc
+    def test_recorded_session_reproduces(self):
+        bram = make_bram(new_dir("pt_verify_bram_") / "bram.bin")
+        r, sdir = record_session(1500, *SYNTH, "--marker-at", "700", "--bram", str(bram))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        v = run_session_check(sdir)
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+        self.assertIn("session reproduces", v.stdout)
+
+    @needs_disc
+    def test_visible_divergence_reports_frame(self):
+        r, sdir = record_session(1500, *SYNTH)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ck = sdir / "session.ckpt"
+        lines = ck.read_text().splitlines()
+        frame = ckpt_frame(lines[3])
+        lines[3] = re.sub(r"fb=[0-9a-f]+", "fb=" + "0" * 16, lines[3])
+        ck.write_text("\n".join(lines) + "\n")
+        v = run_session_check(sdir)
+        self.assertEqual(v.returncode, 1, v.stdout + v.stderr)
+        self.assertIn("DIVERGED", v.stdout)
+        self.assertIn(f"'frame': {frame}", v.stdout)
+
+    @needs_disc
+    def test_ram_only_difference_needs_strict(self):
+        r, sdir = record_session(900)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ck = sdir / "session.ckpt"
+        lines = ck.read_text().splitlines()
+        lines[2] = re.sub(r" ram=[0-9a-f]+", " ram=" + "0" * 16, lines[2])   # leading space: not the ram= inside vram=
+        ck.write_text("\n".join(lines) + "\n")
+        v = run_session_check(sdir)
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+        self.assertIn("RAM-only", v.stdout)
+        self.assertEqual(run_session_check(sdir, "--strict-ram").returncode, 1)
+
+    @needs_disc
+    def test_wrong_disc_is_identity_mismatch(self):
+        r, sdir = record_session(300)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rp = sdir / "session.replay"
+        rp.write_text(re.sub(r"^disc sha1=.*$", "disc sha1=0000", rp.read_text(), flags=re.M))
+        v = run_session_check(sdir)
+        self.assertEqual(v.returncode, 4, v.stdout + v.stderr)
+
+    @needs_disc
+    def test_build_kind_mismatch_warns(self):
+        r, sdir = record_session(300, env={"SCD_NO_TRANSLATE": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        mf = sdir / "manifest.json"
+        m = json.loads(mf.read_text())
+        m["build"] = "translated"
+        mf.write_text(json.dumps(m))
+        v = run_session_check(sdir, env={"SCD_NO_TRANSLATE": "1"})
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+        self.assertIn("warning", v.stdout)
+
+    @needs_disc
+    def test_killed_session_verifies_to_last_checkpoint(self):
+        r, sdir = record_session(2000, *SYNTH, env={"SCD_TEST_KILL_AT": "1000"})
+        self.assertEqual(r.returncode, 70, r.stderr)
+        v = run_session_check(sdir)
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+        self.assertIn("did not end cleanly", v.stdout)
 
 
 class TestDiff(unittest.TestCase):

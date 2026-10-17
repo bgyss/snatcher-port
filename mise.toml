@@ -79,6 +79,10 @@ run = [
 description = "Run a replay headless with the watchdog: mise run playtest tools/playtest/replays/intro_skip.replay (docs/PLAYTEST.md)"
 run = "python tools/playtest/run.py {{arg(name='replay')}} --headless ${PLAYTEST_HEADLESS:-engine/build-interp/scd_headless} ${PLAYTEST_ARGS:-}"
 
+[tasks."playtest:session"]
+description = "Verify a recorded session folder: mise run playtest:session work/sessions/<stamp> (docs/PLAYTEST.md, use the build kind it was recorded with)"
+run = "python tools/playtest/run.py --session {{arg(name='dir')}} --headless ${PLAYTEST_HEADLESS:-engine/build/scd_headless} ${PLAYTEST_ARGS:-}"
+
 [tasks.test-recomp]
 description = "ADR-003 tests: coverage census, coverage report, translator seeds and overlays"
 run = [
