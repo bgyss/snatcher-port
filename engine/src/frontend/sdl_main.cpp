@@ -1,6 +1,9 @@
 // SDL3 front-end: window, audio, keyboard and gamepad input for the Sega CD core.
 //   snatcher <disc.cue> [--justifier] [--record FILE.mp4] [--video-codec h264|h265]   (or drop a .cue file onto the window)
-//   --record-input FILE: save pad input per emulated frame (a .replay for scd_headless --replay) and the starting backup RAM (FILE.bram)
+//   Every boot records a session folder (docs/PLAYTEST.md "Sessions"): work/sessions/ when run from the repository, else
+//   <per-user data dir>/sessions/. --no-session: do not record; --session-dir DIR: parent directory for session folders.
+//   --record-input FILE: also copy the first session's replay to FILE and its starting backup RAM to FILE.bram at exit
+//   F8: mark "this looks wrong" (markers/ in the session folder); F10: the same plus a state snapshot in the log
 //   --justifier: mouse is the Konami Justifier on port 2 (left = trigger, right = start)
 //   --record: record a demo video from boot; F9 starts/stops a recording at any time (default ~/Movies/snatcher-<time>.mp4).
 //   Videos are 1440x1080 with AAC audio, H.264 unless --video-codec h265; the final encode runs in the background.
@@ -12,14 +15,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "manifest.h"
 #include "recorder.h"
 #include "replay.h"
+#include "session.h"
 #include "system.h"
 
 using namespace scd;
@@ -59,6 +65,18 @@ uint16_t gamepad_buttons(SDL_Gamepad* g) {
     return b;
 }
 
+std::string pref_dir() {   // per-user data directory (ends in a separator), "" when SDL cannot provide one
+    char* pref = SDL_GetPrefPath("snatcher-port", "snatcher");
+    std::string s = pref ? pref : "";
+    SDL_free(pref);
+    return s;
+}
+
+std::string bram_path() {
+    const std::string p = pref_dir();
+    return p.empty() ? p : p + "bram.bin";
+}
+
 bool boot(const std::string& cue, bool* running_game) {
     std::string err;
     auto disc = Disc::open(cue, &err);
@@ -66,10 +84,7 @@ bool boot(const std::string& cue, bool* running_game) {
         std::fprintf(stderr, "error: %s\n", err.c_str());
         return false;
     }
-    char* pref = SDL_GetPrefPath("snatcher-port", "snatcher");
-    std::string save = pref ? std::string(pref) + "bram.bin" : std::string();
-    SDL_free(pref);
-    if (!System::instance().init(std::move(disc), save, &err)) {
+    if (!System::instance().init(std::move(disc), bram_path(), &err)) {
         std::fprintf(stderr, "error: %s\n", err.c_str());
         return false;
     }
@@ -115,6 +130,8 @@ int main(int argc, char** argv) {
     bool running_game = false;
     bool gun = false;
     bool want_log = std::getenv("SNATCHER_LOG") != nullptr;
+    bool want_session = true;
+    std::string session_parent;
     double cd_speed = std::getenv("SCD_CD_SPEED") ? std::atof(std::getenv("SCD_CD_SPEED")) : 1.0;
     std::string disc, record_path, record_input, codec = "h264";
     for (int i = 1; i < argc; ++i) {
@@ -125,53 +142,82 @@ int main(int argc, char** argv) {
         else if (a == "--record" && i + 1 < argc) record_path = argv[++i];
         else if (a == "--video-codec" && i + 1 < argc) codec = argv[++i];
         else if (a == "--record-input" && i + 1 < argc) record_input = argv[++i];
+        else if (a == "--no-session") want_session = false;
+        else if (a == "--session-dir" && i + 1 < argc) session_parent = argv[++i];
         else disc = a;
     }
     System::instance().set_cd_speed(cd_speed);
-    if (want_log) {
-        char* pref = SDL_GetPrefPath("snatcher-port", "snatcher");
-        std::string path = std::string(pref ? pref : "") + "debug.log";
-        SDL_free(pref);
-        if (System::instance().open_log(path)) {
-            const int v = SDL_GetVersion();
-            scd::debug_log("platform %s, SDL %d.%d.%d, renderer %s\n", SDL_GetPlatform(), SDL_VERSIONNUM_MAJOR(v), SDL_VERSIONNUM_MINOR(v),
-                           SDL_VERSIONNUM_MICRO(v), SDL_GetRendererName(renderer));
-            const char* adev = SDL_GetAudioDeviceName(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK);
-            scd::debug_log("audio: %s (%s); gamepad: %s; CD speed %.1fx; justifier %s\n", adev ? adev : "?", audio ? "stream ok" : "STREAM FAILED, no sound",
-                           pad ? SDL_GetGamepadName(pad) : "none", cd_speed, gun ? "on" : "off");
-            scd::debug_log("log file: %s\ndisc: %s\n", path.c_str(), disc.empty() ? "(none yet, drop a .cue on the window)" : disc.c_str());
-        } else {
-            std::fprintf(stderr, "could not open debug log %s\n", path.c_str());
-        }
+    if (!record_input.empty() && !want_session) {
+        std::fprintf(stderr, "--record-input saves the session's replay: ignoring --no-session\n");
+        want_session = true;
     }
-    // --record-input: keep the backup RAM the session starts with (the replay is only valid against it) and log pad input per frame.
-    Replay input_replay;
     if (!record_input.empty()) {   // an hour-long freeze hunt must not be lost to a missing directory: fail now, not at exit
         std::ofstream probe(record_input, std::ios::binary);
         if (!probe) { std::fprintf(stderr, "error: cannot write %s (does the directory exist?)\n", record_input.c_str()); return 1; }
     }
-    bool recording_booted = false;   // the replay stays savable after a CPU halt, which clears running_game
-    if (!record_input.empty() && !disc.empty()) {
-        char* pref = SDL_GetPrefPath("snatcher-port", "snatcher");
-        std::string bram = std::string(pref ? pref : "") + "bram.bin";
-        SDL_free(pref);
-        input_replay.bram_sha1 = sha1_file(bram);
-        if (input_replay.bram_sha1 != "none") {
-            std::ifstream src(bram, std::ios::binary);
-            std::ofstream dst(record_input + ".bram", std::ios::binary);
-            dst << src.rdbuf();
-            if (!dst) { std::fprintf(stderr, "error: cannot write %s.bram\n", record_input.c_str()); return 1; }
+    std::vector<std::string> session_args;   // manifest "args": the command line without the disc path
+    for (int i = 1; i < argc; ++i)
+        if (disc.empty() || disc != argv[i]) session_args.push_back(argv[i]);
+    const int sdl_v = SDL_GetVersion();
+    char sdl_version[32];
+    std::snprintf(sdl_version, sizeof sdl_version, "%d.%d.%d", SDL_VERSIONNUM_MAJOR(sdl_v), SDL_VERSIONNUM_MINOR(sdl_v), SDL_VERSIONNUM_MICRO(sdl_v));
+    const char* renderer_name = SDL_GetRendererName(renderer);
+    auto log_header = [&](const std::string& log_path, const std::string& cue) {
+        scd::debug_log("platform %s, SDL %s, renderer %s\n", SDL_GetPlatform(), sdl_version, renderer_name ? renderer_name : "?");
+        const char* adev = SDL_GetAudioDeviceName(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK);
+        scd::debug_log("audio: %s (%s); gamepad: %s; CD speed %.1fx; justifier %s\n", adev ? adev : "?", audio ? "stream ok" : "STREAM FAILED, no sound",
+                       pad ? SDL_GetGamepadName(pad) : "none", cd_speed, gun ? "on" : "off");
+        scd::debug_log("log file: %s\ndisc: %s\n", log_path.c_str(), cue.empty() ? "(none yet, drop a .cue on the window)" : cue.c_str());
+    };
+    auto open_debug_log = [&] {   // --log without a session: the per-user debug.log, as before sessions existed
+        const std::string path = pref_dir() + "debug.log";
+        if (System::instance().open_log(path)) log_header(path, disc);
+        else std::fprintf(stderr, "could not open debug log %s\n", path.c_str());
+    };
+    if (want_log && !want_session) open_debug_log();
+
+    // Session recording: one folder per booted disc. It never blocks play: on any failure the game runs without one.
+    std::unique_ptr<Session> session;
+    bool record_input_written = false;
+    auto open_session = [&](const std::string& cue) {
+        if (!want_session) return;
+        std::error_code ec;
+        const std::string parent = !session_parent.empty() ? session_parent
+                                                           : default_session_parent(std::filesystem::current_path(ec).string(), pref_dir());
+        std::string err;
+        const std::string dir = create_session_dir(parent, session_stamp(std::time(nullptr)), &err);
+        auto s = std::make_unique<Session>();
+        SessionConfig c;
+        c.cue = cue;
+        c.bram_path = bram_path();
+        c.engine = "snatcher app";
+        c.cd_speed = cd_speed;
+        c.justifier = gun;
+        c.manifest.app = "snatcher";
+        c.manifest.os = host_os();
+        c.manifest.sdl = sdl_version;
+        c.manifest.renderer = renderer_name ? renderer_name : "";
+        c.manifest.args = session_args;
+        if (dir.empty() || !s->begin(System::instance(), c, dir, &err)) {
+            std::fprintf(stderr, "session: %s; playing without a session\n", err.c_str());
+            if (want_log) open_debug_log();
+            return;
         }
-        input_replay.disc_sha1 = disc_sha1_from_cue(disc);
-        input_replay.engine = "snatcher app";
-        input_replay.cd_speed = cd_speed;
-        input_replay.justifier = gun;
-    } else if (!record_input.empty()) {
-        std::fprintf(stderr, "--record-input needs the disc on the command line\n");
-        record_input.clear();
-    }
-    if (!disc.empty()) boot(disc, &running_game);
-    if (!record_input.empty() && running_game) { System::instance().set_replay_record(&input_replay); recording_booted = true; }
+        log_header(dir + "/session.log", cue);   // begin() already printed and logged the folder
+        session = std::move(s);
+    };
+    auto close_session = [&](const char* why) {
+        if (!session) return;
+        if (!record_input.empty() && !record_input_written) {   // --record-input: the first session's replay
+            if (session->export_replay(record_input)) std::fprintf(stderr, "saved %s\n", record_input.c_str());
+            else std::fprintf(stderr, "error: could not write %s\n", record_input.c_str());
+            record_input_written = true;
+        }
+        session->end(System::instance(), why);
+        session.reset();
+    };
+
+    if (!disc.empty() && boot(disc, &running_game)) open_session(disc);
     System::instance().set_gun_connected(gun);   // the controller ID is read at boot: start with --justifier to get the Gun Adjust option
     SDL_SetWindowTitle(window, running_game ? "Snatcher" : "Snatcher - drop a .cue file on this window");
 
@@ -234,6 +280,7 @@ int main(int argc, char** argv) {
     uint64_t prev_ns = SDL_GetTicksNS();
     bool visible = true;
 
+    uint64_t flash_until_ns = 0;   // F8/F10: a marker was written, frame the picture in white briefly
     bool quit = false;
     while (!quit) {
         SDL_Event e;
@@ -241,19 +288,22 @@ int main(int argc, char** argv) {
             if (e.type == SDL_EVENT_QUIT) quit = true;
             else if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) {
                 stop_recording();
-                if (recording_booted) {   // frames restart at 0 and the disc/backup RAM change: keep what was recorded so far, stop recording
-                    System::instance().set_replay_record(nullptr);
-                    std::fprintf(stderr, "--record-input: a new disc was dropped, input recording stopped (saved at exit)\n");
-                }
+                close_session("disc_changed");   // frames restart at 0 and the disc/backup RAM change: one session per disc
                 if (running_game) System::instance().shutdown();
                 running_game = false;
-                if (boot(e.drop.data, &running_game)) SDL_SetWindowTitle(window, "Snatcher");
+                if (boot(e.drop.data, &running_game)) {
+                    SDL_SetWindowTitle(window, "Snatcher");
+                    open_session(e.drop.data);
+                }
             } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F11) {
                 bool fs = SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN;
                 SDL_SetWindowFullscreen(window, !fs);
-            } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F10 && !e.key.repeat && running_game) {
-                scd::debug_log("[user] F10 state snapshot at frame %llu\n", (unsigned long long)System::instance().frame_count());
-                System::instance().dump_state();
+            } else if (e.type == SDL_EVENT_KEY_DOWN && (e.key.key == SDLK_F8 || e.key.key == SDLK_F10) && !e.key.repeat && running_game) {
+                if (e.key.key == SDLK_F10) {
+                    scd::debug_log("[user] F10 state snapshot at frame %llu\n", (unsigned long long)System::instance().frame_count());
+                    System::instance().dump_state();
+                }
+                if (session && session->marker(System::instance())) flash_until_ns = SDL_GetTicksNS() + 300000000ull;   // 0.3 s
             } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F9 && !e.key.repeat && running_game) {
                 if (rec) stop_recording(); else start_recording("");
             } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) quit = true;
@@ -293,6 +343,7 @@ int main(int argc, char** argv) {
             }
             while (acc_ns >= period_ns && running_game) {
                 sys.run_frame();
+                if (session) session->after_frame(sys, sys.e020(), SDL_GetTicks());
                 if (rec) rec->frame(sys.framebuffer(), sys.width(), sys.height(), sys.audio());
                 if (audio && !sys.audio().empty()) {
                     int queued = SDL_GetAudioStreamQueued(audio);
@@ -302,7 +353,10 @@ int main(int argc, char** argv) {
                         SDL_PutAudioStreamData(audio, sys.audio().data(), int(sys.audio().size() * sizeof(int16_t)));
                 }
                 sys.audio().clear();
-                if (sys.halted()) running_game = false;
+                if (sys.halted()) {   // the session's watchdog wrote the failure bundle in after_frame
+                    running_game = false;
+                    close_session("halted");
+                }
                 acc_ns -= period_ns;
                 ++ran;
             }
@@ -330,20 +384,20 @@ int main(int argc, char** argv) {
             SDL_FRect src = {0, 0, float(System::instance().width()), float(System::instance().height())};
             SDL_FRect dst = {0, 0, 320, 240};
             SDL_RenderTexture(renderer, tex, &src, &dst);
+            if (SDL_GetTicksNS() < flash_until_ns) {
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                for (int i = 0; i < 3; ++i) {
+                    SDL_FRect r = {float(i), float(i), 320.0f - 2 * i, 240.0f - 2 * i};
+                    SDL_RenderRect(renderer, &r);
+                }
+            }
         }
         SDL_RenderPresent(renderer);
     }
     stop_recording();
     if (!encoders.empty()) std::fprintf(stderr, "finishing video encode...\n");
     for (auto& t : encoders) t.join();
-    if (!record_input.empty() && recording_booted) {   // also after a CPU halt: a crash session is the one worth replaying
-        System::instance().set_replay_record(nullptr);
-        std::ofstream out(record_input, std::ios::binary);
-        out << input_replay.serialize();
-        out.close();
-        if (out) std::fprintf(stderr, "saved %s\n", record_input.c_str());
-        else std::fprintf(stderr, "error: could not write %s\n", record_input.c_str());
-    }
+    close_session("quit");   // after a CPU halt the session was already closed as "halted"
     if (running_game) System::instance().shutdown();
     System::instance().close_log();
     SDL_Quit();
