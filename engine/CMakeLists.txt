@@ -86,7 +86,7 @@ add_custom_target(build_stamp
   VERBATIM)
 
 # ---- Session recording (manifest, session folders): shared by scd_headless and the app (docs/PLAYTEST.md "Sessions").
-add_library(scdsession STATIC src/session/manifest.cpp)
+add_library(scdsession STATIC src/session/manifest.cpp src/session/session.cpp)
 target_include_directories(scdsession PUBLIC src/session PRIVATE ${STAMP_DIR})
 target_link_libraries(scdsession PUBLIC scdcore)
 add_dependencies(scdsession build_stamp)

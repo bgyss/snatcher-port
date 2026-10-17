@@ -18,6 +18,31 @@ def new_dir(prefix):
     return pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=ROOT / "work"))
 
 
+# Synthetic play for session tests: two pad presses and Justifier moves / trigger and start pulls (frames 200..656).
+SYNTH = ("--press", "300:S:6", "--press", "500:C:6", "--justifier",
+         "--gun", "200:100,80,in,T", "--gun", "206:100,80,in,-", "--gun", "650:20,30,out,S", "--gun", "656:20,30,out,-")
+
+
+def record_session(frames, *extra, env=None, sdir=None):
+    """Record a session with scd_headless --session-out. Returns (CompletedProcess, session dir)."""
+    base = new_dir("pt_session_")
+    sdir = sdir or base / "s"
+    out = base / "out"
+    out.mkdir()
+    return run_headless("--frames", str(frames), "--out", str(out), "--session-out", str(sdir), *extra, env=env), sdir
+
+
+def make_bram(path):
+    """A formatted backup RAM file: the core formats a missing one and writes it at exit."""
+    r = run_headless("--frames", "5", "--out", str(path.parent), "--bram", str(path))
+    assert r.returncode == 0, r.stderr
+    return path
+
+
+def ckpt_frame(line):
+    return int(line.split()[0][3:], 16)
+
+
 class TestCheckpoints(unittest.TestCase):
     @needs_disc
     def test_two_runs_identical(self):
@@ -179,6 +204,103 @@ class TestManifest(unittest.TestCase):
         head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
         if head.returncode == 0:   # built from this checkout (and not committed since the build)
             self.assertEqual(m["git_commit"], head.stdout.strip())
+
+
+class TestSession(unittest.TestCase):
+    @needs_headless
+    def test_session_out_rejects_watch(self):
+        r = run_headless("--frames", "5", "--session-out", str(new_dir("pt_session_bad_") / "s"), "--watch")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    @needs_disc
+    def test_session_folder_layout(self):
+        r, sdir = record_session(1200, *SYNTH, "--marker-at", "400", "--marker-at", "900")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for name in ("manifest.json", "session.replay", "session.ckpt", "session.log"):
+            self.assertTrue((sdir / name).exists(), name)
+        self.assertFalse((sdir / "session.replay.bram").exists())   # no --bram: bram sha1=none
+        m = json.loads((sdir / "manifest.json").read_text())
+        self.assertEqual((m["app"], m["frames"], m["exit"], m["markers"], m["failures"]), ("scd_headless", 1200, "quit", 2, 0))
+        self.assertTrue(m["justifier"])
+        self.assertEqual(m["bram_sha1"], "none")
+        self.assertIsNotNone(m["ended"])
+        self.assertEqual(sorted(p.name for p in (sdir / "markers").iterdir()), ["001-f400", "002-f900"])
+        mk = sdir / "markers" / "001-f400"
+        for name in ("marker.json", "screen.ppm", "mainram.bin", "subram.bin", "state.txt"):
+            self.assertTrue((mk / name).exists(), name)
+        self.assertEqual(json.loads((mk / "marker.json").read_text())["frame"], 400)
+        self.assertEqual((mk / "mainram.bin").stat().st_size, 0x10000)
+        self.assertEqual((mk / "subram.bin").stat().st_size, 0x6000)
+        text = (sdir / "session.replay").read_text()
+        self.assertTrue(text.startswith("# snatcher-replay v2\n"))
+        self.assertIn("justifier on\n", text)
+        for line in ("@0x12c S\n", "@0x132 -\n", "g0xc8 100,80,in,T\n", "g0x28a 20,30,out,S\n"):
+            self.assertIn(line, text)
+        self.assertIn("[user] marker 001 at frame 400", (sdir / "session.log").read_text())
+
+    @needs_disc
+    def test_session_replays_identically(self):
+        # The session opens the log (heartbeat, cpu_pcs) and writes a marker (state_text); the replay does neither.
+        r, sdir = record_session(1500, *SYNTH, "--marker-at", "700")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = sdir.parent / "replay"
+        out.mkdir()
+        ck = out / "r.ckpt"
+        rr = run_headless("--frames", "1500", "--out", str(out), "--replay", str(sdir / "session.replay"), "--ckpt-out", str(ck))
+        self.assertEqual(rr.returncode, 0, rr.stderr)
+        self.assertEqual((sdir / "session.ckpt").read_text(), ck.read_text())
+
+    @needs_disc
+    def test_session_copies_starting_bram(self):
+        import hashlib
+        base = new_dir("pt_session_bram_")
+        bram = make_bram(base / "bram.bin")
+        before = hashlib.sha1(bram.read_bytes()).hexdigest()
+        r, sdir = record_session(600, "--bram", str(bram))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        copy = sdir / "session.replay.bram"
+        self.assertEqual(hashlib.sha1(copy.read_bytes()).hexdigest(), before)
+        self.assertIn(f"bram sha1={before}\n", (sdir / "session.replay").read_text())
+        self.assertEqual(json.loads((sdir / "manifest.json").read_text())["bram_sha1"], before)
+
+    @needs_disc
+    def test_session_hang_writes_one_bundle(self):
+        r, sdir = record_session(200, "--hang-frames", "30", env={"SCD_TEST_STICK_E020": "20"})
+        self.assertEqual(r.returncode, 0, r.stderr)   # play continues after a hang
+        bundles = list((sdir / "failure").iterdir())
+        self.assertEqual(len(bundles), 1, bundles)
+        self.assertRegex(bundles[0].name, r"^001-hang-f\d+$")
+        for name in ("report.json", "final.ppm", "mainram.bin", "subram.bin", "repro.replay", "state.txt"):
+            self.assertTrue((bundles[0] / name).exists(), name)
+        self.assertEqual(json.loads((sdir / "manifest.json").read_text())["failures"], 1)
+
+    @needs_disc
+    def test_unwritable_file_is_dropped(self):
+        sdir = new_dir("pt_session_ro_") / "s"
+        (sdir / "session.ckpt").mkdir(parents=True)   # a directory where the checkpoint file goes: fopen fails
+        r, _ = record_session(120, sdir=sdir)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("session.ckpt", r.stderr)
+        self.assertTrue((sdir / "session.replay").read_text().startswith("# snatcher-replay v2\n"))
+        self.assertEqual(json.loads((sdir / "manifest.json").read_text())["frames"], 120)
+
+    @needs_disc
+    def test_session_survives_kill(self):
+        r, sdir = record_session(2000, *SYNTH, env={"SCD_TEST_KILL_AT": "1000"})
+        self.assertEqual(r.returncode, 70, r.stderr)
+        m = json.loads((sdir / "manifest.json").read_text())
+        self.assertIsNone(m["ended"])
+        self.assertIsNone(m["frames"])
+        self.assertIsNone(m["exit"])
+        text = (sdir / "session.ckpt").read_text()
+        last = ckpt_frame(text.splitlines()[-1])
+        self.assertTrue(900 <= last <= 960, last)   # flushed every 60 emulated frames: the last flush was after frame 960
+        out = sdir.parent / "replay"
+        out.mkdir()
+        ck = out / "r.ckpt"
+        rr = run_headless("--frames", str(last), "--out", str(out), "--replay", str(sdir / "session.replay"), "--ckpt-out", str(ck))
+        self.assertEqual(rr.returncode, 0, rr.stderr)
+        self.assertEqual(text, ck.read_text())
 
 
 A = "@0x64 scene=E022:0003/E06C:0000 vram=1 ram=2 fb=3\n@0xc8 scene=E022:0003/E06C:0001 vram=4 ram=5 fb=6\n"

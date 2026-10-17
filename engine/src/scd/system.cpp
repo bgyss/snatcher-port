@@ -1595,9 +1595,11 @@ StateHash System::state_hash() {
     // RAM: all of Main RAM plus the Sub program/data window the debug dumps use. Tune this window if the determinism
     // gate shows false positives from uninitialised areas (record which bytes differ, then mask them).
     s.ram = fnv(prg_ram_ + 0x7000, 0x6000, fnv(main_ram_, sizeof main_ram_));
-    s.fb = fnv(vdp_.framebuffer(), size_t(width()) * height() * sizeof(uint32_t));
+    s.fb = fb_hash();
     return s;
 }
+
+uint64_t System::fb_hash() const { return fnv(vdp_.framebuffer(), size_t(width()) * height() * sizeof(uint32_t)); }
 
 void System::cpu_pcs(uint32_t* main_pc, uint32_t* sub_pc) {
     Cpu keep = cur_;

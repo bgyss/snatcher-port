@@ -36,6 +36,17 @@ int main() {
         for (uint64_t f = 1; f < 7000; ++f) warns += w.feed(s(f, uint16_t(f), 42)).kind == WatchVerdict::kStillScreen;
         assert(warns == 1);
     }
+    {   // HangLatch (live sessions): one report per stall, re-armed once $E020 moves again
+        Watchdog w({30, 1800});
+        HangLatch latch;
+        int fired = 0;
+        for (uint64_t f = 1; f <= 400; ++f) {
+            // advancing, stuck at 49 for frames 50..199, advancing again, stuck at 249 from frame 250 on
+            const uint16_t e020 = f < 50 ? uint16_t(f) : f < 200 ? uint16_t(49) : f < 250 ? uint16_t(f) : uint16_t(249);
+            fired += latch.fire(w.feed(s(f, e020, f)), e020);
+        }
+        assert(fired == 2);
+    }
     std::puts("watchdog_test: ok");
     return 0;
 }

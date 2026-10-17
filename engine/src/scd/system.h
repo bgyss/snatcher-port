@@ -78,6 +78,7 @@ public:
     Vdp& vdp() { return vdp_; }
     // FNV-1a hashes of VDP memory+registers, RAM and the framebuffer (playtest checkpoints).
     StateHash state_hash();
+    uint64_t fb_hash() const;   // state_hash().fb alone: the watchdog's per-frame sample
     void cpu_pcs(uint32_t* main_pc, uint32_t* sub_pc);
     uint16_t e020() const { return uint16_t(main_ram_[0xE020] << 8 | main_ram_[0xE021]); }
     uint16_t e022() const { return uint16_t(main_ram_[0xE022] << 8 | main_ram_[0xE023]); }

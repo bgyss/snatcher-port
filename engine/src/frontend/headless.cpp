@@ -2,6 +2,7 @@
 //   scd_headless <disc.cue> [--frames N] [--ppm-every N --out DIR] [--wav out.wav] [--video out.mp4]
 //                [--press FRAME:BUTTONS:HOLD ...] [--replay FILE [--bram FILE]] [--ckpt-out FILE [--ckpt-every N]] [--manifest-out FILE] [--watch [--hang-frames N]]
 //                [--justifier [--gun FRAME:X,Y,in|out,T|S|TS|- ...]]   (gun state from FRAME on, entries in frame order)
+//                [--session-out DIR [--marker-at FRAME ...]] [--manifest-out FILE]   (SCD_TEST_KILL_AT=<frame>: exit at once, for tests)
 // --video writes a 1440x1080 AAC demo video of the run, H.264 or with --video-codec h265 H.265 (needs ffmpeg, see recorder.h).
 // BUTTONS is a string of U D L R B C A S. Output stays in the directory given by --out.
 #include <algorithm>
@@ -18,6 +19,7 @@
 #include "manifest.h"
 #include "recorder.h"
 #include "replay.h"
+#include "session.h"
 #include "system.h"
 #include "watchdog.h"
 
@@ -64,9 +66,10 @@ int main(int argc, char** argv) {
     const std::string started = iso8601_local(std::time(nullptr));
     int frames = 600, ppm_every = 0, ckpt_every = 300, hang_frames = 300;
     bool watch = false, justifier = false;
-    std::string replay_path, ckpt_path, bram, manifest_path;
+    std::string replay_path, ckpt_path, bram, manifest_path, session_out;
     std::vector<Press> presses;
     std::vector<GunPress> guns;
+    std::vector<uint64_t> marker_at;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
@@ -80,6 +83,8 @@ int main(int argc, char** argv) {
         else if (a == "--ckpt-every" && i + 1 < argc) ckpt_every = std::atoi(argv[++i]);
         else if (a == "--bram" && i + 1 < argc) bram = argv[++i];
         else if (a == "--manifest-out" && i + 1 < argc) manifest_path = argv[++i];
+        else if (a == "--session-out" && i + 1 < argc) session_out = argv[++i];
+        else if (a == "--marker-at" && i + 1 < argc) marker_at.push_back(std::strtoull(argv[++i], nullptr, 10));
         else if (a == "--watch") watch = true;
         else if (a == "--hang-frames" && i + 1 < argc) hang_frames = std::atoi(argv[++i]);
         else if (a == "--justifier") justifier = true;
@@ -98,6 +103,10 @@ int main(int argc, char** argv) {
             char b[16];
             if (std::sscanf(argv[++i], "%d:%15[^:]:%d", &f, b, &h) == 3) presses.push_back({f, parse_buttons(b), h});
         }
+    }
+    if (!session_out.empty() && (watch || !replay_path.empty())) {
+        std::fprintf(stderr, "error: --session-out records a session; it cannot be combined with --watch or --replay\n");
+        return 2;
     }
     if (const char* lf = std::getenv("SCD_LOG")) {   // debug log file, same as the app's --log
         if (!System::instance().open_log(lf)) { std::fprintf(stderr, "error: cannot open %s\n", lf); return 1; }
@@ -134,6 +143,12 @@ int main(int argc, char** argv) {
     const uint64_t stick_from = std::getenv("SCD_TEST_STICK_E020") ? std::strtoull(std::getenv("SCD_TEST_STICK_E020"), nullptr, 10) : 0;
     uint16_t stuck_val = 0;
     bool stuck_set = false;
+    auto sampled_e020 = [&]() -> uint16_t {   // SCD_TEST_STICK_E020: test hook, pins the watchdog's sample only
+        uint16_t e20 = sys.e020();
+        if (stick_from && sys.frame_count() >= stick_from) { if (!stuck_set) { stuck_val = e20; stuck_set = true; } e20 = stuck_val; }
+        return e20;
+    };
+    const uint64_t kill_at = std::getenv("SCD_TEST_KILL_AT") ? std::strtoull(std::getenv("SCD_TEST_KILL_AT"), nullptr, 10) : 0;
     Replay trace;   // the pad stream actually applied, for the failure bundle's repro.replay
     if (watch) {
         trace.disc_sha1 = disc_sha1_from_cue(cue);
@@ -141,6 +156,21 @@ int main(int argc, char** argv) {
         trace.justifier = justifier;
         trace.engine = "scd_headless --watch";
         sys.set_replay_record(&trace);
+    }
+    Session session;   // --session-out: the app's session writer, driven by --press / --gun (tests)
+    if (!session_out.empty()) {
+        SessionConfig sc;
+        sc.cue = cue;
+        sc.bram_path = bram;
+        sc.engine = "scd_headless --session-out";
+        sc.cd_speed = sys.cd_speed();
+        sc.justifier = justifier;
+        sc.ckpt_every = ckpt_every;
+        sc.hang_frames = hang_frames;
+        sc.manifest.app = "scd_headless";
+        sc.manifest.os = host_os();
+        for (int i = 2; i < argc; ++i) sc.manifest.args.push_back(argv[i]);
+        if (!session.begin(sys, sc, session_out, &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
     }
     FILE* ckpt = nullptr;
     if (!ckpt_path.empty() && !(ckpt = std::fopen(ckpt_path.c_str(), "w"))) { std::fprintf(stderr, "error: cannot open %s\n", ckpt_path.c_str()); return 1; }
@@ -185,10 +215,13 @@ int main(int argc, char** argv) {
         sys.run_frame();
         if (frametime) ft.push_back({std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), f + 1});
         rec.frame(sys.framebuffer(), sys.width(), sys.height(), sys.audio());
+        if (session.active()) {
+            session.after_frame(sys, sampled_e020(), sys.frame_count() * 1000 / 60);   // emulated clock: a flush per second of play, deterministic
+            for (uint64_t m : marker_at) if (m == sys.frame_count()) session.marker(sys);
+            if (kill_at && sys.frame_count() == kill_at) std::_Exit(70);   // SCD_TEST_KILL_AT: a killed app (no cleanup)
+        }
         if (watch) {
-            uint16_t e20 = sys.e020();
-            if (stick_from && sys.frame_count() >= stick_from) { if (!stuck_set) { stuck_val = e20; stuck_set = true; } e20 = stuck_val; }   // SCD_TEST_STICK_E020: test hook, samples only
-            WatchVerdict v = dog.feed({sys.frame_count(), e20, sys.state_hash().fb, sys.halted()});
+            WatchVerdict v = dog.feed({sys.frame_count(), sampled_e020(), sys.state_hash().fb, sys.halted()});
             if (v.kind == WatchVerdict::kStillScreen) std::fprintf(stderr, "[watch] warning: screen unchanged since frame %llu\n", (unsigned long long)v.since);
             else if (v.kind != WatchVerdict::kOk) {
                 if (ckpt) { std::fputs(ckpts.final_line(sys).c_str(), ckpt); std::fclose(ckpt); }
@@ -250,6 +283,7 @@ int main(int argc, char** argv) {
         }
     }
     if (ckpt) { std::fputs(ckpts.final_line(sys).c_str(), ckpt); std::fclose(ckpt); }
+    if (session.active()) session.end(sys, sys.halted() ? "halted" : "quit");
     if (frametime && !ft.empty()) {
         double sum = 0; int over = 0;
         for (auto& [ms, fr] : ft) { sum += ms; over += ms > 1000.0 / 59.9227; }

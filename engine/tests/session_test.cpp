@@ -1,10 +1,14 @@
 #undef NDEBUG   // tests rely on assert even in Release builds
 #include <cassert>
 #include <cstdio>
+#include <chrono>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "manifest.h"
+#include "session.h"
 
 using namespace scd;
 
@@ -74,6 +78,29 @@ static void test_iso8601_local() {
     assert(s.compare(0, 19, date) == 0);
 }
 
+static void test_session_dirs() {
+    namespace fs = std::filesystem;
+    const fs::path base = fs::temp_directory_path() /
+                          ("snatcher_session_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::string err;
+    const std::string parent = (base / "p").string();
+    const std::string a = create_session_dir(parent, "20261016-201403", &err);
+    const std::string b = create_session_dir(parent, "20261016-201403", &err);
+    const std::string c = create_session_dir(parent, "20261016-201403", &err);
+    assert(fs::path(a).filename() == "20261016-201403" && fs::is_directory(a));
+    assert(fs::path(b).filename() == "20261016-201403-1");
+    assert(fs::path(c).filename() == "20261016-201403-2");
+    std::ofstream((base / "file").string()) << "x";   // a file where the parent directory should be
+    err.clear();
+    assert(create_session_dir((base / "file").string(), "s", &err).empty() && !err.empty());
+    fs::create_directories(base / "repo" / "engine" / "src" / "scd");
+    assert(default_session_parent((base / "repo").string(), "/pref/") == (base / "repo" / "work" / "sessions").string());
+    assert(default_session_parent((base / "elsewhere").string(), "/pref/") == "/pref/sessions");
+    fs::remove_all(base);
+    const std::string st = session_stamp(1792206843);
+    assert(st.size() == 15 && st[8] == '-');
+}
+
 int main() {
     test_json_escape();
     test_manifest_open_session();
@@ -81,6 +108,7 @@ int main() {
     test_iso8601_local();
     assert(!host_os().empty());
     assert(std::string(build_git_commit()).size() > 0);
+    test_session_dirs();
     std::puts("session_test: ok");
     return 0;
 }

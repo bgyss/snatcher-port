@@ -1,4 +1,4 @@
-// Hang / crash / still-screen detector. Pure logic: scd_headless feeds it one sample per emulated frame.
+// Hang / crash / still-screen detector. Pure logic: scd_headless and session recording feed it one sample per emulated frame.
 #pragma once
 #include <cstdint>
 
@@ -28,6 +28,22 @@ private:
     bool first_ = true, warned_ = false;
     uint16_t last_e020_ = 0;
     uint64_t last_fb_ = 0, e020_frame_ = 0, fb_frame_ = 0;
+};
+
+// Live play (sessions): play continues after a hang, so report each stall once. fire() is true on the first kHang
+// verdict of a stall and false until the sampled $E020 differs from the value it stalled at.
+class HangLatch {
+public:
+    bool fire(const WatchVerdict& v, uint16_t e020) {
+        if (latched_ && e020 != e020_) latched_ = false;
+        if (v.kind != WatchVerdict::kHang || latched_) return false;
+        latched_ = true;
+        e020_ = e020;
+        return true;
+    }
+private:
+    bool latched_ = false;
+    uint16_t e020_ = 0;
 };
 
 }  // namespace scd
