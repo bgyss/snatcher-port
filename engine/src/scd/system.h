@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "disc.h"
+#include "coverage.h"
 #include "pcm.h"
 #include "psg.h"
 #include "replay.h"
@@ -16,6 +17,8 @@
 extern "C" {
 #include "ym3438.h"
 }
+
+namespace lift { struct Cpu; }
 
 namespace scd {
 
@@ -51,7 +54,8 @@ public:
     void set_gun_connected(bool on) { gun_connected_ = on; }
     void set_gun(int x, int y, bool inside, uint8_t buttons) { gun_x_ = x; gun_y_ = y; gun_inside_ = inside; gun_buttons_ = buttons; }
 
-    // Replay hooks (run_frame start): play overrides port 1's pad, record logs port 1's pad per emulated frame.
+    // Replay hooks (run_frame start): play overrides port 1's pad (and the gun, for a replay with justifier on); record
+    // logs port 1's pad, and the gun state while the gun is connected, per emulated frame.
     void set_replay_play(const Replay* r) { replay_play_ = r; }
     void set_replay_record(Replay* r) { replay_rec_ = r; }
 
@@ -74,11 +78,14 @@ public:
     Vdp& vdp() { return vdp_; }
     // FNV-1a hashes of VDP memory+registers, RAM and the framebuffer (playtest checkpoints).
     StateHash state_hash();
+    uint64_t fb_hash() const;   // state_hash().fb alone: the watchdog's per-frame sample
     void cpu_pcs(uint32_t* main_pc, uint32_t* sub_pc);
     uint16_t e020() const { return uint16_t(main_ram_[0xE020] << 8 | main_ram_[0xE021]); }
     uint16_t e022() const { return uint16_t(main_ram_[0xE022] << 8 | main_ram_[0xE023]); }
     uint16_t e06c() const { return uint16_t(main_ram_[0xE06C] << 8 | main_ram_[0xE06D]); }
-    // Prints PCs and key registers of both CPUs, the CD state and the PCM channels to the log.
+    // PCs and key registers of both CPUs, the CD state and the PCM channels (state.txt in markers and failure bundles).
+    std::string state_text();
+    // Prints state_text() to the log.
     void dump_state();
     // Debug log file (SNATCHER_LOG / --log): everything log() prints plus CD loads, CD-DA, input changes, game-state
     // changes, a heartbeat every ~5 s and a "no change for 30 s" notice. Truncates the file.
@@ -86,10 +93,13 @@ public:
     void close_log();
     // 1x = a real drive (75 sectors/s, 0.3 s seeks); higher is faster. Set before init().
     void set_cd_speed(double x) { cd_speed_ = x < 1.0 ? 1.0 : x; }
+    double cd_speed() const { return cd_speed_; }
     bool bram_selftest();
     void enable_profile(bool on) { profile_ = on; pc_hist_[0].clear(); pc_hist_[1].clear(); }
     void dump_profile(int top);
     void dump_overlay_hist();
+    // SCD_COVERAGE census (ADR-003): writes the TSV, false when the census is off (SCD_LIFT_VERIFY) or the file cannot be written.
+    bool write_coverage(const std::string& path);
     // Per-instruction trace of one CPU (0 = Main, 1 = Sub) starting at a frame.
     void set_trace(int cpu, uint64_t from_frame, int count) { trace_cpu_ = cpu; trace_from_ = from_frame; trace_left_ = count; }
     void set_trace_from(uint64_t f) { trace_from_ = f; }
@@ -112,13 +122,19 @@ private:
     uint32_t prg_ovl_gen_ = 0;
     int run_main_translated(int cycles);
     int32_t* main_budget_ = nullptr;
-    bool main_span_checked_ = false, main_span_ok_ = false;
+    uint32_t main_code_gen_ = 0;   // bumped by Main writes to the $FFE100 code window: its ranges are re-checked
     bool translate_ = false;
     bool span_ok_[4] = {false, false, false, false};
     bool span_checked_[4] = {false, false, false, false};
     uint64_t translated_instr_budget_ = 0, fallback_steps_ = 0, verified_ = 0;
     uint32_t exit_ring_[16] = {};
     uint32_t exit_pos_ = 0;
+    // ADR-003 M2: the translated register file to and from Musashi (the register home between translated runs until M4),
+    // and interrupt entry in host code. stopped_: a translated `stop` parked the CPU until an interrupt.
+    void lift_load(lift::Cpu& c);
+    void lift_store(const lift::Cpu& c, uint32_t pc);
+    uint32_t take_irq(lift::Cpu& c, int level, uint32_t pc, int32_t& budget);
+    bool stopped_[2] = {false, false};
 
     // CPU scheduling
     void select_cpu(Cpu c);
@@ -269,6 +285,14 @@ private:
     bool ovl_log_ = false;
     uint32_t cur_load_lba_ = 0;
     std::map<uint32_t, uint64_t> ovl_hist_;
+    Coverage cov_;
+    bool cov_on_ = false;
+    Fallback fallback_why_ = Fallback::kInterpreter;   // cause of the Musashi steps about to run (read by trace_pc)
+    void note_overlay_exec();                         // first execution at $28000 after a load: tag (and with SCD_DUMP_OVERLAYS dump) the image
+    std::string ovl_dump_dir_;
+    bool ovl_track_ = false;                          // census or overlay dump active
+    uint32_t ovl_snap_gen_ = 0xFFFFFFFF;
+    uint32_t ovl_image_ = 0;                          // CRC32 of the first 2 KB at $28000 for the current overlay (Task 3)
     bool trace_audio_ = false;
     uint64_t ym_writes_ = 0;
     uint32_t watch_ = 0, stack_at_ = 0;

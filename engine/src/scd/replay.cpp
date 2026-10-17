@@ -73,10 +73,56 @@ std::string buttons_to_string(uint16_t b) {
     return s.empty() ? "-" : s;
 }
 
+std::string gun_to_string(const GunState& g) {
+    std::string b;
+    if (g.buttons & 1) b += 'T';
+    if (g.buttons & 2) b += 'S';
+    if (b.empty()) b = "-";
+    return std::to_string(g.x) + "," + std::to_string(g.y) + "," + (g.inside ? "in" : "out") + "," + b;
+}
+
+bool gun_from_string(const std::string& s, GunState* out) {
+    std::vector<std::string> f;
+    for (size_t start = 0;;) {
+        size_t c = s.find(',', start);
+        f.push_back(s.substr(start, c == std::string::npos ? std::string::npos : c - start));
+        if (c == std::string::npos) break;
+        start = c + 1;
+    }
+    if (f.size() != 4) return false;
+    GunState g;
+    for (int i = 0; i < 2; ++i) {
+        const std::string& v = f[i];
+        if (v.empty() || !(std::isdigit(static_cast<unsigned char>(v[0])) || (v[0] == '-' && v.size() > 1))) return false;
+        char* end;
+        long n = std::strtol(v.c_str(), &end, 10);
+        if (*end || n < -32768 || n > 32767) return false;
+        (i ? g.y : g.x) = int(n);
+    }
+    if (f[2] == "in") g.inside = true;
+    else if (f[2] != "out") return false;
+    if (f[3] != "-") {
+        if (f[3].empty()) return false;
+        for (char c : f[3]) {
+            if (c == 'T') g.buttons |= 1;
+            else if (c == 'S') g.buttons |= 2;
+            else return false;
+        }
+    }
+    *out = g;
+    return true;
+}
+
 void Replay::add(uint64_t frame, uint16_t buttons) {
     uint16_t cur = events.empty() ? 0 : events.back().buttons;
     if (buttons == cur) return;
     events.push_back({frame, buttons});
+}
+
+void Replay::add_gun(uint64_t frame, const GunState& g) {
+    const GunState cur = gun_events.empty() ? GunState{} : gun_events.back().gun;
+    if (g == cur) return;
+    gun_events.push_back({frame, g});
 }
 
 uint16_t Replay::buttons_at(uint64_t frame) const {
@@ -84,21 +130,41 @@ uint16_t Replay::buttons_at(uint64_t frame) const {
     return it == events.begin() ? 0 : std::prev(it)->buttons;
 }
 
-std::string Replay::serialize() const {
+GunState Replay::gun_at(uint64_t frame) const {
+    auto it = std::upper_bound(gun_events.begin(), gun_events.end(), frame, [](uint64_t f, const GunEvent& e) { return f < e.frame; });
+    return it == gun_events.begin() ? GunState{} : std::prev(it)->gun;
+}
+
+std::string Replay::serialize_header() const {
     std::ostringstream o;
-    o << "# snatcher-replay v1\n";
+    o << "# snatcher-replay v2\n";
     o << "disc sha1=" << disc_sha1 << "\n";
     o << "bram sha1=" << bram_sha1 << "\n";
     o << "engine " << engine << "\n";
     o << "cdspeed " << cd_speed << "\n";
     o << "justifier " << (justifier ? "on" : "off") << "\n";
-    for (auto& e : events) {
-        char line[64];
-        std::snprintf(line, sizeof line, "@0x%llx %s\n", (unsigned long long)e.frame, buttons_to_string(e.buttons).c_str());
-        o << line;
-    }
     return o.str();
 }
+
+std::string Replay::serialize_events(size_t pad_from, size_t gun_from) const {
+    std::string o;
+    char line[96];
+    size_t p = pad_from, g = gun_from;
+    while (p < events.size() || g < gun_events.size()) {
+        const bool pad = g >= gun_events.size() || (p < events.size() && events[p].frame <= gun_events[g].frame);
+        if (pad) {
+            std::snprintf(line, sizeof line, "@0x%llx %s\n", (unsigned long long)events[p].frame, buttons_to_string(events[p].buttons).c_str());
+            ++p;
+        } else {
+            std::snprintf(line, sizeof line, "g0x%llx %s\n", (unsigned long long)gun_events[g].frame, gun_to_string(gun_events[g].gun).c_str());
+            ++g;
+        }
+        o += line;
+    }
+    return o;
+}
+
+std::string Replay::serialize() const { return serialize_header() + serialize_events(0, 0); }
 
 bool Replay::parse(const std::string& text, Replay* out, std::string* err) {
     auto fail = [&](int line, const std::string& m) { if (err) *err = "line " + std::to_string(line) + ": " + m; return false; };
@@ -106,23 +172,33 @@ bool Replay::parse(const std::string& text, Replay* out, std::string* err) {
     std::string line;
     int n = 0;
     Replay r;
-    bool header = false;
+    int version = 0;
     while (std::getline(in, line)) {
         ++n;
         if (!line.empty() && line.back() == '\r') line.pop_back();   // CRLF checkouts / Windows-written files
         if (line.empty()) continue;
         if (line[0] == '#') {
-            if (line != "# snatcher-replay v1") return fail(n, "unsupported or malformed header");
-            header = true;
+            if (line == "# snatcher-replay v1") version = 1;
+            else if (line == "# snatcher-replay v2") version = 2;
+            else return fail(n, "unsupported or malformed header");
             continue;
         }
-        if (!header) return fail(n, "missing '# snatcher-replay v1' header");
-        if (line[0] == '@') {
+        if (!version) return fail(n, "missing '# snatcher-replay v1' or 'v2' header");
+        if (line[0] == '@' || line[0] == 'g') {
+            const bool gun = line[0] == 'g';
+            if (gun && version < 2) return fail(n, "gun events need a v2 replay");
             char* end;
             if (line.size() < 2 || !std::isdigit(static_cast<unsigned char>(line[1]))) return fail(n, "bad frame");
             unsigned long long f = std::strtoull(line.c_str() + 1, &end, 0);
             if (*end != ' ') return fail(n, "bad frame");
             std::string b = end + 1;
+            if (gun) {
+                GunState g;
+                if (!gun_from_string(b, &g)) return fail(n, "bad gun state (expected x,y,in|out,T|S|TS|-)");
+                if (!r.gun_events.empty() && f <= r.gun_events.back().frame) return fail(n, "gun frames must be strictly increasing");
+                r.gun_events.push_back({f, g});
+                continue;
+            }
             if (b.empty()) return fail(n, "missing buttons");
             if (b != "-")
                 for (char c : b) if (buttons_from_string(std::string(1, c)) == 0) return fail(n, std::string("unknown button '") + c + "'");
@@ -143,7 +219,8 @@ bool Replay::parse(const std::string& text, Replay* out, std::string* err) {
         else if (key == "justifier") r.justifier = val == "on";
         else return fail(n, "unknown key '" + key + "'");
     }
-    if (!header) return fail(1, "missing '# snatcher-replay v1' header");
+    if (!version) return fail(1, "missing '# snatcher-replay v1' or 'v2' header");
+    r.version = version;
     *out = std::move(r);
     return true;
 }

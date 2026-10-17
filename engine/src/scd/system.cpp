@@ -9,14 +9,14 @@
 
 extern "C" {
 #include "m68k.h"
+int scd_musashi_take_stop(void);   // musashi_stop.c: clears Musashi's stop state, returns whether it was set
 }
 #ifdef SNATCHER_TRANSLATED
 #include "cpu68k.h"
+#include "translate_entry.h"
 namespace lift {
 bool sub_has(uint32_t pc);
 Exit sub_run(Cpu& c, uint32_t pc, int32_t& budget);
-extern const Span kSubSpans[];
-extern const int kSubSpanCount;
 #ifdef SNATCHER_TRANSLATED_OVL909
 bool ovl909_has(uint32_t pc);
 Exit ovl909_run(Cpu& c, uint32_t pc, int32_t& budget);
@@ -30,9 +30,17 @@ extern const uint32_t kSubCrc;
 #ifdef SNATCHER_TRANSLATED_MAIN
 bool main_has(uint32_t pc);
 Exit main_run(Cpu& c, uint32_t pc, int32_t& budget);
-extern const Span kMainSpans[];
-extern const int kMainSpanCount;
+extern const Span kMainRanges[];
+extern const int kMainRangeCount;
+extern const uint32_t kMainCrc;
+bool mainram_has(uint32_t pc);
+Exit mainram_run(Cpu& c, uint32_t pc, int32_t& budget);
+extern const Span kMainramRanges[];
+extern const int kMainramRangeCount;
+extern const uint32_t kMainramCrc;
 #endif
+extern const Program kOverlays[];
+extern const int kOverlayCount;
 }  // namespace lift
 #endif
 
@@ -134,6 +142,10 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     trace_bios_ = std::getenv("SCD_TRACE_BIOS") != nullptr;
     comm_log_ = std::getenv("SCD_COMMLOG") != nullptr;
     ovl_log_ = std::getenv("SCD_OVERLAYS") != nullptr;
+    // The census is meaningless under SCD_LIFT_VERIFY: verify replays every translated instruction in Musashi.
+    cov_on_ = std::getenv("SCD_COVERAGE") != nullptr && std::getenv("SCD_LIFT_VERIFY") == nullptr;
+    if (const char* d = std::getenv("SCD_DUMP_OVERLAYS")) ovl_dump_dir_ = d;
+    ovl_track_ = cov_on_ || !ovl_dump_dir_.empty();
 #ifdef SNATCHER_TRANSLATED
     translate_ = std::getenv("SCD_NO_TRANSLATE") == nullptr;
 #endif
@@ -201,6 +213,7 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     frames_ = 0;
     line_ = 0;
     halted_ = false;
+    stopped_[0] = stopped_[1] = false;
     return true;
 }
 
@@ -346,6 +359,16 @@ void System::update_main_irq() { refresh_irq(kMain); }
 void System::update_sub_irq() { refresh_irq(kSub); }
 
 void System::trace_pc(uint32_t pc) {
+    if (ovl_track_) {
+        uint32_t p = pc & 0xFFFFFF;
+        bool ovl = cur_ == kSub && p >= 0x28000 && p < 0x80000;
+        if (ovl) note_overlay_exec();
+        if (cov_on_) {
+            Fallback why = fallback_why_;
+            if (why == Fallback::kNotTranslated && (hle_.count(p) || hle_.count(p - 2))) why = Fallback::kHleStub;   // trap word, or the rts after it
+            cov_.note(int(cur_), ovl ? ovl_image_ : 0, why, p);
+        }
+    }
     if (ovl_log_ && cur_ == kSub && pc >= 0x16700 && pc < 0x80000) ovl_hist_[(pc >> 8) << 8]++;
     if (stack_at_ && (pc & 0xFFFFFF) == stack_at_ && frames_ >= trace_from_ && stack_left_ > 0) {
         --stack_left_;
@@ -392,6 +415,12 @@ void System::advance_sub_time(int cycles) {
 }
 
 
+static uint32_t crc32_of(const uint8_t* p, size_t n) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < n; ++i) { crc ^= p[i]; for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1))); }
+    return ~crc;
+}
+
 #ifdef SNATCHER_TRANSLATED
 struct MainBusAdapter;
 struct SubBusAdapter : lift::Bus {
@@ -421,120 +450,136 @@ struct MainBusAdapter : lift::Bus {
     void w16(uint32_t a, uint16_t v) override { s.main_write16(a, v); }
 };
 
-static uint32_t crc32_of(const uint8_t* p, size_t n) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < n; ++i) { crc ^= p[i]; for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1))); }
-    return ~crc;
-}
-
-struct TEntry {
-    bool (*has)(uint32_t);
-    lift::Exit (*run)(lift::Cpu&, uint32_t, int32_t&);
-    const lift::Span* ranges;
-    int nranges;
-    uint32_t crc;
-    bool overlay;
-    uint32_t checked_gen = 0xFFFFFFFF;
-    std::vector<uint8_t> state;   // per range: 0 unchecked, 1 ok, 2 differs
-    int last = 0;
-};
-
-static uint32_t crc_range(const uint8_t* mem, uint32_t lo, uint32_t hi) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (uint32_t a = lo; a < hi; ++a) {
-        crc ^= mem[a];
-        for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1)));
-    }
-    return ~crc;
-}
-
-// True when the code range containing pc is in memory exactly as translated (checked once per range, overlays again after each disc load).
-static bool entry_code_ok(TEntry& e, const uint8_t* mem, uint32_t pc, uint32_t gen) {
-    if (e.checked_gen != gen) { e.checked_gen = gen; e.state.assign(size_t(e.nranges), 0); }
-    if (!(pc >= e.ranges[e.last].lo && pc < e.ranges[e.last].hi)) {
-        int lo = 0, hi = e.nranges - 1, found = -1;
-        while (lo <= hi) { int m = (lo + hi) / 2; if (pc < e.ranges[m].lo) hi = m - 1; else if (pc >= e.ranges[m].hi) lo = m + 1; else { found = m; break; } }
-        if (found < 0) return false;
-        e.last = found;
-    }
-    uint8_t& st = e.state[size_t(e.last)];
-    if (st == 0) st = crc_range(mem, e.ranges[e.last].lo, e.ranges[e.last].hi) == e.ranges[e.last].crc ? 1 : 2;
-    return st == 1;
-}
-
+// TEntry, entry_code_ok and pick_entry live in translate_entry.h (unit-tested by translate_entry_test).
 static std::vector<TEntry>& sub_entries() {
-    static std::vector<TEntry> e = {
-        {lift::sub_has, lift::sub_run, lift::kSubRanges, lift::kSubRangeCount, lift::kSubCrc, false},
+    static std::vector<TEntry> e = [] {
+        std::vector<TEntry> v = {
+            {lift::sub_has, lift::sub_run, lift::kSubRanges, lift::kSubRangeCount, lift::kSubCrc, false},
 #ifdef SNATCHER_TRANSLATED_OVL909
-        {lift::ovl909_has, lift::ovl909_run, lift::kOvl909Ranges, lift::kOvl909RangeCount, lift::kOvl909Crc, true},
+            {lift::ovl909_has, lift::ovl909_run, lift::kOvl909Ranges, lift::kOvl909RangeCount, lift::kOvl909Crc, true},
 #endif
-    };
+        };
+        for (int i = 0; i < lift::kOverlayCount; ++i) {   // overlay dumps from the census (ADR-003), first CRC match wins
+            const lift::Program& p = lift::kOverlays[i];
+            v.push_back({p.has, p.run, p.ranges, *p.nranges, *p.crc, true});
+        }
+        return v;
+    }();
     return e;
 }
 
+// Musashi's SR write neither swaps stacks nor checks interrupts (m68k_set_reg), so the inactive stack pointer travels explicitly:
+// USP in supervisor mode, ISP in user mode.
+void System::lift_load(lift::Cpu& c) {
+    const uint32_t sr = reg_get(M68K_REG_SR);
+    for (int i = 0; i < 8; ++i) c.d[i] = reg_get(M68K_REG_D0 + i);
+    for (int i = 0; i < 7; ++i) c.a[i] = reg_get(M68K_REG_A0 + i);
+    c.a[7] = reg_get(M68K_REG_SP);
+    c.other_sp = reg_get((sr & 0x2000) ? M68K_REG_USP : M68K_REG_ISP);
+    c.set_ccr(sr & 0x1F);
+    c.sr_sys = uint16_t(sr & 0xA700);
+}
+
+void System::lift_store(const lift::Cpu& c, uint32_t pc) {
+    for (int i = 0; i < 8; ++i) reg_set(M68K_REG_D0 + i, c.d[i]);
+    for (int i = 0; i < 7; ++i) reg_set(M68K_REG_A0 + i, c.a[i]);
+    reg_set(M68K_REG_SR, c.sr_sys | c.ccr());
+    reg_set(M68K_REG_SP, c.a[7]);
+    reg_set((c.sr_sys & 0x2000) ? M68K_REG_USP : M68K_REG_ISP, c.other_sp);
+    reg_set(M68K_REG_PC, pc);
+}
+
+// Interrupt entry in host code, as Musashi's m68ki_exception_interrupt: acknowledge (clears the source, refreshes the IPL),
+// then frame and vector (lift::interrupt_entry), 44 cycles. pc is what Musashi would push.
+uint32_t System::take_irq(lift::Cpu& c, int level, uint32_t pc, int32_t& budget) {
+    int_ack(level);
+    stopped_[cur_] = false;
+    budget -= lift::exc_cycles(24 + level);
+    return lift::interrupt_entry(c, level, pc);
+}
+
 // Runs the Sub CPU for `cycles`, executing translated code where available and falling back to Musashi per instruction.
-// Returns cycles actually used. cur_ must be kSub.
+// Interrupts are taken in host code (ADR-003 M2). Returns cycles actually used. cur_ must be kSub.
 int System::run_sub_translated(int cycles) {
     static LogBus bus(*this);
     static const bool verify = std::getenv("SCD_LIFT_VERIFY") != nullptr;
     lift::Cpu c;
     c.bus = &bus;
+    c.ipl = &cpu_irq_[kSub];          // the level Musashi sees; a translated SR write that unmasks it exits with Exit::Irq
     int32_t budget = cycles;
-    while (budget > 0) {
+    bool force_one = false;           // after an entry: run exactly the handler's first instruction before the next check
+    while (budget > 0 || force_one) {
+        // A `stop` Musashi executed (fallback step, verify replay) parks the CPU here, in stopped_, as a translated one does:
+        // the host takes interrupts, and a stop left set in Musashi would keep it from running the handler.
+        if (scd_musashi_take_stop()) stopped_[kSub] = true;
+        const LoopStep step = loop_step(force_one, stopped_[kSub], cpu_irq_[kSub], reg_get(M68K_REG_SR));
+        if (step == LoopStep::kDeliver) {
+            lift_load(c);
+            lift_store(c, take_irq(c, cpu_irq_[kSub], reg_get(M68K_REG_PC), budget));
+            // The forced handler-first-instruction step cannot miss a higher level: the acknowledge only clears sources, so
+            // cpu_irq_ can only drop; the mask is now the delivered level; nothing between here and that step advances time or
+            // raises a source. (NMI, level 7, is not used: no source raises it.)
+            force_one = true;
+            continue;
+        }
+        if (step == LoopStep::kIdle) { budget = 0; break; }   // stopped: Musashi consumes the slice the same way
         uint32_t pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
-        uint32_t sr = reg_get(M68K_REG_SR);
-        bool irq_blocked = sub_irq_level() <= int((sr >> 8) & 7);
-        TEntry* te = nullptr;
-        if (irq_blocked) {
-            for (auto& e : sub_entries()) if (e.has(pc)) { te = &e; break; }
-        }
+        if (ovl_track_ && pc >= 0x28000 && pc < 0x80000) note_overlay_exec();   // before translated overlay code can modify its own image
+        // First program whose code at pc is in memory exactly as translated (overlays are re-checked after every disc load into PRG RAM).
+        bool claimed = false;
+        TEntry* te = pick_entry(sub_entries(), prg_ram_, pc, prg_ovl_gen_, claimed);
+        fallback_why_ = claimed ? Fallback::kCodeMismatch : Fallback::kNotTranslated;
+        const bool single = force_one;
+        force_one = false;
         if (te) {
-            for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
-            c.set_ccr(sr & 0x1F);
-            c.sr_sys = uint16_t(sr & 0xA700);
-            // The code bytes in memory must be the ones that were translated (overlays are re-checked after every disc load into PRG RAM).
-            bool ok = entry_code_ok(*te, prg_ram_, pc, te->overlay ? prg_ovl_gen_ : 0);
-            if (ok) {
-                int32_t before = budget;
-                lift::Cpu saved = c;
-                uint32_t spc = pc;
-                if (verify) { bus.logging = true; bus.writes.clear(); budget = 1; before = 1; }
-                lift::Exit ex = te->run(c, pc, budget);
-                if (verify && ex.kind != lift::Exit::NotTranslated && ex.kind != lift::Exit::Unsupported) {
-                    // Undo the writes, replay the same instruction in Musashi, compare.
-                    auto writes = bus.writes; bus.logging = false;
-                    std::vector<uint8_t> after(writes.size());
-                    for (size_t i = 0; i < writes.size(); ++i) after[i] = uint8_t(sub_read8(writes[i].first));
-                    for (size_t i = writes.size(); i-- > 0;) sub_write8(writes[i].first, writes[i].second);
-                    for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, saved.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, saved.a[i]); }
-                    reg_set(M68K_REG_SR, saved.sr_sys | saved.ccr()); reg_set(M68K_REG_SP, saved.a[7]); reg_set(M68K_REG_PC, spc);
-                    m68k_execute(1);
-                    bool bad = false;
-                    for (auto& w : writes) if (w.first >= 0xFE0000) bad = true;   // I/O side effects (gate array, PCM, BRAM) make a replay meaningless
-                    for (int i = 0; i < 8 && !bad; ++i) {
-                        uint32_t m = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP);
-                        if (reg_get(M68K_REG_D0 + i) != c.d[i]) { log("[lift-verify] pc=%06x op=%04x d%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.d[i], reg_get(M68K_REG_D0 + i)); bad = true; }
-                        else if (m != c.a[i]) { log("[lift-verify] pc=%06x op=%04x a%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.a[i], m); bad = true; }
-                    }
-                    if (!bad && (reg_get(M68K_REG_PC) & 0xFFFFFF) != (ex.pc & 0xFFFFFF)) { log("[lift-verify] pc=%06x op=%04x next lift=%06x musashi=%06x\n", spc, read16(spc), ex.pc, reg_get(M68K_REG_PC) & 0xFFFFFF); bad = true; }
-                    if (!bad && (reg_get(M68K_REG_SR) & 0x1F) != c.ccr()) { log("[lift-verify] pc=%06x op=%04x ccr lift=%02x musashi=%02x\n", spc, read16(spc), c.ccr(), reg_get(M68K_REG_SR) & 0x1F); bad = true; }
-                    for (size_t i = 0; i < writes.size() && !bad; ++i) if (uint8_t(sub_read8(writes[i].first)) != after[i]) { log("[lift-verify] pc=%06x op=%04x mem[%06x] lift=%02x musashi=%02x\n", spc, read16(spc), writes[i].first, after[i], sub_read8(writes[i].first)); bad = true; }
-                    budget -= 4;
-                    ++verified_;
-                    continue;
+            lift_load(c);
+            int32_t one = 1;
+            int32_t& b = single ? one : budget;
+            int32_t before = b;
+            lift::Cpu saved = c;
+            uint32_t spc = pc;
+            if (verify) { bus.logging = true; bus.writes.clear(); b = 1; before = 1; }
+            lift::Exit ex = te->run(c, pc, b);
+            if (verify && ex.kind != lift::Exit::NotTranslated && ex.kind != lift::Exit::Unsupported && ex.kind != lift::Exit::Stop) {
+                // Undo the writes, replay the same instruction in Musashi with interrupts held off, compare. An SR write that
+                // unmasks one exited with Exit::Irq; the interrupt is taken in host code at the top of the loop.
+                auto writes = bus.writes; bus.logging = false;
+                std::vector<uint8_t> after(writes.size());
+                for (size_t i = 0; i < writes.size(); ++i) after[i] = uint8_t(sub_read8(writes[i].first));
+                for (size_t i = writes.size(); i-- > 0;) sub_write8(writes[i].first, writes[i].second);
+                lift_store(saved, spc);
+                m68k_set_irq(0);
+                m68k_execute(1);
+                m68k_set_irq(unsigned(cpu_irq_[kSub]));
+                lift::Cpu m;
+                lift_load(m);
+                bool bad = false;
+                for (auto& w : writes) if (w.first >= 0xFE0000) bad = true;   // I/O side effects (gate array, PCM, BRAM) make a replay meaningless
+                for (int i = 0; i < 8 && !bad; ++i) {
+                    if (m.d[i] != c.d[i]) { log("[lift-verify] pc=%06x op=%04x d%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.d[i], m.d[i]); bad = true; }
+                    else if (m.a[i] != c.a[i]) { log("[lift-verify] pc=%06x op=%04x a%d lift=%08x musashi=%08x\n", spc, read16(spc), i, c.a[i], m.a[i]); bad = true; }
                 }
-                bus.logging = false;
-                translated_instr_budget_ += uint64_t(before - budget);
-                for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, c.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, c.a[i]); }
-                reg_set(M68K_REG_SP, c.a[7]);
-                reg_set(M68K_REG_SR, c.sr_sys | c.ccr());
-                reg_set(M68K_REG_PC, ex.pc);
-                exit_ring_[exit_pos_++ & 15] = uint32_t(ex.kind) << 28 | (ex.pc & 0xFFFFFF);
-                if (ex.kind == lift::Exit::Budget) break;
-                if (ex.pc != pc || ex.kind != lift::Exit::NotTranslated) { /* fall through to a fallback step at ex.pc */ }
+                if (!bad && m.other_sp != c.other_sp) { log("[lift-verify] pc=%06x op=%04x inactive sp lift=%08x musashi=%08x\n", spc, read16(spc), c.other_sp, m.other_sp); bad = true; }
+                if (!bad && (reg_get(M68K_REG_PC) & 0xFFFFFF) != (ex.pc & 0xFFFFFF)) { log("[lift-verify] pc=%06x op=%04x next lift=%06x musashi=%06x\n", spc, read16(spc), ex.pc, reg_get(M68K_REG_PC) & 0xFFFFFF); bad = true; }
+                if (!bad && (m.sr_sys | m.ccr()) != (c.sr_sys | c.ccr())) { log("[lift-verify] pc=%06x op=%04x sr lift=%04x musashi=%04x\n", spc, read16(spc), c.sr_sys | c.ccr(), m.sr_sys | m.ccr()); bad = true; }
+                for (size_t i = 0; i < writes.size() && !bad; ++i) if (uint8_t(sub_read8(writes[i].first)) != after[i]) { log("[lift-verify] pc=%06x op=%04x mem[%06x] lift=%02x musashi=%02x\n", spc, read16(spc), writes[i].first, after[i], sub_read8(writes[i].first)); bad = true; }
+                budget -= 4;
+                ++verified_;
+                continue;
             }
+            bus.logging = false;
+            translated_instr_budget_ += uint64_t(before - b);
+            if (single) budget -= 1 - one;
+            uint32_t npc = ex.pc;
+            if (ex.kind == lift::Exit::Irq) npc = take_irq(c, cpu_irq_[kSub], ex.pc, budget);   // taken inside the SR write, as Musashi does
+            if (ex.kind == lift::Exit::Stop) stopped_[kSub] = true;
+            lift_store(c, npc);
+            exit_ring_[exit_pos_++ & 15] = uint32_t(ex.kind) << 28 | (ex.pc & 0xFFFFFF);
+            // Budget ends the loop (or, after a single instruction, goes on); NotTranslated re-dispatches: ex.pc may belong to another program.
+            if (ex.kind == lift::Exit::Budget || ex.kind == lift::Exit::NotTranslated || ex.kind == lift::Exit::Irq || ex.kind == lift::Exit::Stop) continue;
+            fallback_why_ = Fallback::kUnsupported;   // Musashi executes the instruction at ex.pc
         }
-        // Interpreter step (also services pending interrupts).
+        // Interpreter step.
         ++fallback_steps_;
         int used = m68k_execute(1);
         budget -= used > 0 ? used : 4;
@@ -545,37 +590,52 @@ int System::run_sub_translated(int cycles) {
 #endif
 
 #ifdef SNATCHER_TRANSLATED_MAIN
+static std::vector<TEntry>& main_entries() {
+    static std::vector<TEntry> e = {
+        {lift::main_has, lift::main_run, lift::kMainRanges, lift::kMainRangeCount, lift::kMainCrc, false, 0xFFFF},
+        {lift::mainram_has, lift::mainram_run, lift::kMainramRanges, lift::kMainramRangeCount, lift::kMainramCrc, true, 0xFFFF},
+    };
+    return e;
+}
+
 int System::run_main_translated(int cycles) {
     static MainBusAdapter bus(*this);
     lift::Cpu c;
     c.bus = &bus;
+    c.ipl = &cpu_irq_[kMain];
     int32_t budget = cycles;
-    main_budget_ = &budget;
-    while (budget > 0) {
+    main_budget_ = &budget;           // VDP DMA stalls are charged here, also during a single handler instruction
+    bool force_one = false;
+    while (budget > 0 || force_one) {
+        if (scd_musashi_take_stop()) stopped_[kMain] = true;   // a `stop` Musashi executed (see run_sub_translated)
+        const LoopStep step = loop_step(force_one, stopped_[kMain], cpu_irq_[kMain], reg_get(M68K_REG_SR));
+        if (step == LoopStep::kDeliver) {
+            lift_load(c);
+            lift_store(c, take_irq(c, cpu_irq_[kMain], reg_get(M68K_REG_PC), budget));   // vectors through main_read16 ($70: Gate Array H-INT vector)
+            force_one = true;   // no higher level can be pending before that step (see run_sub_translated)
+            continue;
+        }
+        if (step == LoopStep::kIdle) { budget = 0; break; }
         uint32_t pc = reg_get(M68K_REG_PC) & 0xFFFFFF;
-        uint32_t sr = reg_get(M68K_REG_SR);
-        bool irq_blocked = main_irq_level() <= int((sr >> 8) & 7);
-        if (irq_blocked && lift::main_has(pc)) {
-            for (int i = 0; i < lift::kMainSpanCount; ++i) {
-                const lift::Span& sp = lift::kMainSpans[i];
-                if (pc >= sp.lo && pc < sp.hi && !main_span_checked_) {
-                    main_span_checked_ = true;
-                    main_span_ok_ = crc_range(main_ram_, sp.lo & 0xFFFF, sp.hi & 0xFFFF ? (sp.hi & 0xFFFF) : 0x10000) == sp.crc;
-                    if (!main_span_ok_) log("[translate] Main code differs from the translated image; using the interpreter\n");
-                }
-            }
-            if (main_span_ok_) {
-                for (int i = 0; i < 8; ++i) { c.d[i] = reg_get(M68K_REG_D0 + i); c.a[i] = i < 7 ? reg_get(M68K_REG_A0 + i) : reg_get(M68K_REG_SP); }
-                c.set_ccr(sr & 0x1F);
-                c.sr_sys = uint16_t(sr & 0xA700);
-                lift::Exit ex = lift::main_run(c, pc, budget);
-                for (int i = 0; i < 8; ++i) { reg_set(M68K_REG_D0 + i, c.d[i]); if (i < 7) reg_set(M68K_REG_A0 + i, c.a[i]); }
-                reg_set(M68K_REG_SP, c.a[7]);
-                reg_set(M68K_REG_SR, c.sr_sys | c.ccr());
-                reg_set(M68K_REG_PC, ex.pc);
-                if (ex.kind == lift::Exit::Budget) break;
-                if (halted_) break;
-            }
+        // The IP is checked once per range; the $FFE100 code again after every Main write to its window (main_code_gen_).
+        bool claimed = false;
+        TEntry* te = pick_entry(main_entries(), main_ram_, pc, main_code_gen_, claimed);
+        fallback_why_ = claimed ? Fallback::kCodeMismatch : Fallback::kNotTranslated;
+        const bool single = force_one;
+        force_one = false;
+        if (te) {
+            lift_load(c);
+            int32_t one = 1;
+            lift::Exit ex = te->run(c, pc, single ? one : budget);
+            if (single) budget -= 1 - one;
+            uint32_t npc = ex.pc;
+            if (ex.kind == lift::Exit::Irq) npc = take_irq(c, cpu_irq_[kMain], ex.pc, budget);
+            if (ex.kind == lift::Exit::Stop) stopped_[kMain] = true;
+            lift_store(c, npc);
+            if (halted_) break;
+            // NotTranslated re-dispatches: the IP calls into $FFE100 and back.
+            if (ex.kind == lift::Exit::Budget || ex.kind == lift::Exit::NotTranslated || ex.kind == lift::Exit::Irq || ex.kind == lift::Exit::Stop) continue;
+            fallback_why_ = Fallback::kUnsupported;
         }
         ++fallback_steps_;
         int used = m68k_execute(1);
@@ -598,6 +658,7 @@ void System::run_cpu(Cpu c, int cycles) {
     select_cpu(c);
     refresh_irq(c);
     int used;
+    fallback_why_ = translate_ ? Fallback::kNotTranslated : Fallback::kInterpreter;   // whole-slice Musashi runs (no translated program for this CPU)
 #ifdef SNATCHER_TRANSLATED
 #ifdef SNATCHER_TRANSLATED_MAIN
     if (c == kMain && translate_) used = run_main_translated(budget); else
@@ -613,8 +674,17 @@ void System::run_cpu(Cpu c, int cycles) {
 
 void System::run_frame() {
     if (halted_) return;
-    if (replay_play_) set_pad(0, replay_play_->buttons_at(frames_));
-    if (replay_rec_) replay_rec_->add(frames_, pad_[0]);
+    if (replay_play_) {
+        set_pad(0, replay_play_->buttons_at(frames_));
+        if (replay_play_->justifier) {
+            const GunState g = replay_play_->gun_at(frames_);
+            set_gun(g.x, g.y, g.inside, g.buttons);
+        }
+    }
+    if (replay_rec_) {
+        replay_rec_->add(frames_, pad_[0]);
+        if (gun_connected_) replay_rec_->add_gun(frames_, {gun_x_, gun_y_, gun_inside_, gun_buttons_});
+    }
     const int active = vdp_.active_lines();
     for (line_ = 0; line_ < kLines; ++line_) {
         vdp_.begin_line(line_);
@@ -743,7 +813,12 @@ void System::main_write8(uint32_t a, uint32_t v) {
         else if (r >= 0x11 && r < 0x18 && (r & 1)) psg_.write(uint8_t(v));
         return;
     }
-    if (a >= 0xE00000) main_ram_[a & 0xFFFF] = uint8_t(v);
+    if (a >= 0xE00000) {
+        main_ram_[a & 0xFFFF] = uint8_t(v);
+        // The $FFE100 code (mainram program) changed: re-check its CRC ranges. The window $FFE100..$FFE3D0 is also
+        // hard-coded in tools/lift/gen_program.py (PROGRAMS['mainram']) and tools/lift/coverage_report.py (MAINRAM).
+        if ((a & 0xFFFF) - 0xE100u < 0x2D0u) ++main_code_gen_;
+    }
 }
 
 void System::main_write16(uint32_t a, uint32_t v) {
@@ -1387,6 +1462,39 @@ std::string System::comm_string() const {
     return std::string(buf);
 }
 
+void System::note_overlay_exec() {
+    if (ovl_snap_gen_ == prg_ovl_gen_) return;
+    ovl_snap_gen_ = prg_ovl_gen_;
+    ovl_image_ = crc32_of(prg_ram_ + 0x28000, 0x800);
+    if (ovl_dump_dir_.empty()) return;
+    char name[32];
+    std::snprintf(name, sizeof name, "/ovl_%08x.bin", ovl_image_);
+    std::string path = ovl_dump_dir_ + name;
+    if (FILE* f = std::fopen(path.c_str(), "rb")) { std::fclose(f); return; }
+    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+        std::fwrite(prg_ram_ + 0x28000, 1, 0x80000 - 0x28000, f);
+        std::fclose(f);
+        log("[overlay] dumped %s (load generation %u, frame %llu)\n", path.c_str(), prg_ovl_gen_, (unsigned long long)frames_);
+    } else {
+        log("[overlay] cannot write %s\n", path.c_str());
+    }
+}
+
+bool System::write_coverage(const std::string& path) {
+    if (!cov_on_) { log("[coverage] census disabled: SCD_LIFT_VERIFY replays translated code in Musashi\n"); return false; }
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) { log("[coverage] cannot write %s\n", path.c_str()); return false; }
+    std::string s = cov_.to_tsv(frames_, translate_);
+    std::fwrite(s.data(), 1, s.size(), f);
+    std::fclose(f);
+    log("[coverage] %s: not_translated %llu steps/%zu pcs, code_mismatch %llu, irq_entry %llu, hle_stub %llu, unsupported %llu, interpreter %llu\n",
+        path.c_str(), (unsigned long long)cov_.steps(Fallback::kNotTranslated), cov_.distinct_pcs(Fallback::kNotTranslated),
+        (unsigned long long)cov_.steps(Fallback::kCodeMismatch), (unsigned long long)cov_.steps(Fallback::kIrqEntry),
+        (unsigned long long)cov_.steps(Fallback::kHleStub), (unsigned long long)cov_.steps(Fallback::kUnsupported),
+        (unsigned long long)cov_.steps(Fallback::kInterpreter));
+    return true;
+}
+
 void System::dump_overlay_hist() {
     for (auto& kv : ovl_hist_) log("[ovl-exec] page %06x hits %llu\n", kv.first, (unsigned long long)kv.second);
 }
@@ -1413,22 +1521,36 @@ bool System::bram_selftest() {
     return ok;
 }
 
-void System::dump_state() {
+static void appendf(std::string& s, const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = std::vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n > 0) s.append(buf, size_t(std::min(n, int(sizeof buf) - 1)));
+}
+
+std::string System::state_text() {
+    std::string s;
     Cpu keep = cur_;
     for (int i = 0; i < 2; ++i) {
         select_cpu(Cpu(i));
-        log("%s PC=%06x SR=%04x SP=%06x D0=%08x A0=%08x A6=%08x\n", i ? "Sub " : "Main", reg_get(M68K_REG_PC) & 0xFFFFFF,
-            reg_get(M68K_REG_SR), reg_get(M68K_REG_SP) & 0xFFFFFF, reg_get(M68K_REG_D0), reg_get(M68K_REG_A0), reg_get(M68K_REG_A6));
+        appendf(s, "%s PC=%06x SR=%04x SP=%06x D0=%08x A0=%08x A6=%08x\n", i ? "Sub " : "Main", reg_get(M68K_REG_PC) & 0xFFFFFF,
+                reg_get(M68K_REG_SR), reg_get(M68K_REG_SP) & 0xFFFFFF, reg_get(M68K_REG_D0), reg_get(M68K_REG_A0), reg_get(M68K_REG_A6));
     }
     select_cpu(keep);
-    log("VDP regs:");
-    for (int i = 0; i < 24; ++i) log(" %02x", vdp_.reg(i));
-    log("  ffef02=%02x%02x\n", main_ram_[0xef02], main_ram_[0xef03]);
-    log("sub_run=%d owner=%d mode1m=%d main_flag=%02x sub_flag=%02x int_mask=%04x ien2=%d prg_bank=%d\n", sub_run_, word_owner_, mode_1m_,
-        main_flag_, sub_flag_, int_mask_, ien2_, prg_bank_);
-    log("CD: reading=%d lba=%u remaining=%u buf_valid=%d cdda=%d track=%d reads=%llu\n", cdc_reading_, cdc_lba_, cdc_remaining_, cdc_buf_valid_, cdda_playing_, cdda_track_, (unsigned long long)cd_reads_);
-    log("%s", pcm_.describe().c_str());
+    appendf(s, "VDP regs:");
+    for (int i = 0; i < 24; ++i) appendf(s, " %02x", vdp_.reg(i));
+    appendf(s, "  ffef02=%02x%02x\n", main_ram_[0xef02], main_ram_[0xef03]);
+    appendf(s, "sub_run=%d owner=%d mode1m=%d main_flag=%02x sub_flag=%02x int_mask=%04x ien2=%d prg_bank=%d\n", sub_run_, word_owner_, mode_1m_,
+            main_flag_, sub_flag_, int_mask_, ien2_, prg_bank_);
+    appendf(s, "CD: reading=%d lba=%u remaining=%u buf_valid=%d cdda=%d track=%d reads=%llu\n", cdc_reading_, cdc_lba_, cdc_remaining_, cdc_buf_valid_,
+            cdda_playing_, cdda_track_, (unsigned long long)cd_reads_);
+    s += pcm_.describe();
+    return s;
 }
+
+void System::dump_state() { log("%s", state_text().c_str()); }
 
 bool System::open_log(const std::string& path) {
     close_log();
@@ -1473,9 +1595,11 @@ StateHash System::state_hash() {
     // RAM: all of Main RAM plus the Sub program/data window the debug dumps use. Tune this window if the determinism
     // gate shows false positives from uninitialised areas (record which bytes differ, then mask them).
     s.ram = fnv(prg_ram_ + 0x7000, 0x6000, fnv(main_ram_, sizeof main_ram_));
-    s.fb = fnv(vdp_.framebuffer(), size_t(width()) * height() * sizeof(uint32_t));
+    s.fb = fb_hash();
     return s;
 }
+
+uint64_t System::fb_hash() const { return fnv(vdp_.framebuffer(), size_t(width()) * height() * sizeof(uint32_t)); }
 
 void System::cpu_pcs(uint32_t* main_pc, uint32_t* sub_pc) {
     Cpu keep = cur_;

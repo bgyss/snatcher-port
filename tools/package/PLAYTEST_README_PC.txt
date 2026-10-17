@@ -65,14 +65,14 @@ Please note for anything that looks or sounds wrong, or crashes:
   - what happened, and what you expected,
   - your OS version and graphics/audio setup.
 A screenshot or a short F9 recording helps a lot.
-If the game freezes, goes black, or won't advance, please send the debug log.
-Start it with --log:
-  snatcher "/path/to/Snatcher.cue" --log
-The log is written next to the save (see above) as debug.log; it is replaced
-each launch, so copy it before relaunching. It records the machine/SDL/audio
-setup, every CD read, music start/stop, your key presses, game-state changes
-and a status line every 5 seconds. Pressing F10 at the moment it hangs adds a
-full state snapshot. It contains no game data.
+Every launch records a session folder next to the save (see above), in
+sessions/<date-time>/, with your input, a debug log and status checkpoints,
+so the developer can replay exactly what you played. Press F8 the moment
+something looks wrong (the picture flashes a white frame) and write down what
+you saw with the marker number; a freeze is detected and recorded by itself.
+Please zip and send the whole folder of that session privately: it contains
+screenshots and memory snapshots of the game and your save, so do not post it
+publicly. (--no-session turns recording off.)
 
 Snatcher is (c) Konami. This is a non-commercial fan project, not affiliated
 with or endorsed by Konami.

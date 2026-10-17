@@ -67,12 +67,48 @@ run = "tools/macos/check_present.sh"
 description = "Playtest harness unit and end-to-end tests (replay format, watchdog, checkpoints, runner)"
 run = [
   "cmake -S engine -B engine/build-interp -DCMAKE_BUILD_TYPE=Release",
-  "cmake --build engine/build-interp -j --target scd_headless replay_test watchdog_test",
+  "cmake --build engine/build-interp -j --target scd_headless replay_test watchdog_test checkpoint_test session_test",
   "engine/build-interp/replay_test",
   "engine/build-interp/watchdog_test",
+  "engine/build-interp/checkpoint_test",
+  "engine/build-interp/session_test",
   "SCD_HEADLESS=engine/build-interp/scd_headless python tools/playtest/test_playtest.py",
 ]
 
 [tasks.playtest]
 description = "Run a replay headless with the watchdog: mise run playtest tools/playtest/replays/intro_skip.replay (docs/PLAYTEST.md)"
 run = "python tools/playtest/run.py {{arg(name='replay')}} --headless ${PLAYTEST_HEADLESS:-engine/build-interp/scd_headless} ${PLAYTEST_ARGS:-}"
+
+[tasks."playtest:session"]
+description = "Verify a recorded session folder: mise run playtest:session work/sessions/<stamp> (docs/PLAYTEST.md, use the build kind it was recorded with)"
+run = "python tools/playtest/run.py --session {{arg(name='dir')}} --headless ${PLAYTEST_HEADLESS:-engine/build/scd_headless} ${PLAYTEST_ARGS:-}"
+
+[tasks.test-recomp]
+description = "ADR-003 tests: coverage census, coverage report, translator seeds and overlays"
+run = [
+  "cmake -S engine -B engine/build-interp -DCMAKE_BUILD_TYPE=Release",
+  "cmake --build engine/build-interp -j --target scd_headless coverage_test translate_entry_test",
+  "engine/build-interp/coverage_test",
+  "engine/build-interp/translate_entry_test",
+  "python tools/lift/test_coverage_report.py",
+  "python tools/lift/test_gen_program.py",
+  "python tools/lift/test_m68k_decode.py",
+  "SCD_HEADLESS_INTERP=engine/build-interp/scd_headless python tools/lift/test_coverage.py",
+]
+
+[tasks.census]
+description = "ADR-003 M1: run the reference replays on the interpreter build, dump overlays and write translator seeds (extracted/code)"
+run = [
+  "cmake -S engine -B engine/build-interp -DCMAKE_BUILD_TYPE=Release",
+  "cmake --build engine/build-interp -j --target scd_headless",
+  "SCD_DUMP_OVERLAYS=extracted/code/overlays tools/lift/census.sh engine/build-interp/scd_headless work/census/interp tools/playtest/replays/*.replay ${CENSUS_REPLAYS:-}",
+  "python tools/lift/coverage_report.py work/census/interp/*.tsv --code-dir extracted/code --seeds-out extracted/code/seeds",
+]
+
+[tasks.coverage]
+description = "ADR-003 gate (M2): run the reference replays on the translated build; fails if anything but HLE ran in the interpreter"
+run = [
+  "mise run build",
+  "tools/lift/census.sh engine/build/scd_headless work/census/translated tools/playtest/replays/*.replay ${CENSUS_REPLAYS:-}",
+  "python tools/lift/coverage_report.py work/census/translated/*.tsv --code-dir extracted/code --seeds-out extracted/code/seeds --check --gate m2",
+]

@@ -26,7 +26,8 @@ else()
     WORKING_DIRECTORY ${MUSASHI_GEN})
 endif()
 add_library(musashi STATIC
-  ${MUSASHI}/m68kcpu.c ${MUSASHI_GEN}/m68kops.c ${MUSASHI}/softfloat/softfloat.c)
+  ${MUSASHI}/m68kcpu.c ${MUSASHI_GEN}/m68kops.c ${MUSASHI}/softfloat/softfloat.c
+  src/scd/musashi_stop.c)   # local: Musashi's stop state for the translated run loops (ADR-003 M2)
 target_include_directories(musashi PUBLIC ${MUSASHI} PRIVATE ${MUSASHI_GEN})
 target_compile_options(musashi PRIVATE
   $<$<NOT:$<C_COMPILER_ID:MSVC>>:-w>)
@@ -36,7 +37,8 @@ target_include_directories(nuked_opn2 PUBLIC third_party/nuked-opn2)
 
 # ---- Core (no platform dependencies)
 add_library(scdcore STATIC
-  src/scd/disc.cpp src/scd/vdp.cpp src/scd/pcm.cpp src/scd/psg.cpp src/scd/system.cpp src/scd/replay.cpp)
+  src/scd/disc.cpp src/scd/vdp.cpp src/scd/pcm.cpp src/scd/psg.cpp src/scd/system.cpp src/scd/replay.cpp
+  src/scd/checkpoint.cpp src/scd/debug_dump.cpp)
 target_include_directories(scdcore PUBLIC src/scd src/lift)
 
 # Optional: build-time translation of the Sub CPU program from the user's own disc blobs
@@ -44,37 +46,72 @@ target_include_directories(scdcore PUBLIC src/scd src/lift)
 if(SNATCHER_TRANSLATE_DIR)
   find_package(Python3 REQUIRED)
   set(GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
-  add_custom_command(OUTPUT ${GEN_DIR}/sub_translated.cpp
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${GEN_DIR} ${SNATCHER_TRANSLATE_DIR} sub
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/m68k_decode.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/emit.py)
-  add_custom_command(OUTPUT ${GEN_DIR}/main_translated.cpp
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${GEN_DIR} ${SNATCHER_TRANSLATE_DIR} main
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/m68k_decode.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/emit.py)
-  target_sources(scdcore PRIVATE ${GEN_DIR}/sub_translated.cpp)
+  set(LIFT ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift)
+  # Seed files and overlay dumps come from `mise run census` (ADR-003); new files are picked up on the next build.
+  file(GLOB LIFT_SEEDS CONFIGURE_DEPENDS ${SNATCHER_TRANSLATE_DIR}/seeds/*.txt)
+  file(GLOB LIFT_OVERLAYS CONFIGURE_DEPENDS ${SNATCHER_TRANSLATE_DIR}/overlays/ovl_*.bin)
+  set(LIFT_DEPS ${LIFT}/gen_program.py ${LIFT}/m68k_decode.py ${LIFT}/emit.py ${LIFT_SEEDS})
+  function(lift_program prog out)
+    add_custom_command(OUTPUT ${GEN_DIR}/${out}
+      COMMAND ${Python3_EXECUTABLE} ${LIFT}/gen_program.py ${GEN_DIR} ${SNATCHER_TRANSLATE_DIR} ${prog}
+      DEPENDS ${LIFT_DEPS} ${ARGN})
+    target_sources(scdcore PRIVATE ${GEN_DIR}/${out})
+  endfunction()
+  lift_program(sub sub_translated.cpp)
   if(EXISTS ${SNATCHER_TRANSLATE_DIR}/ovl_909.bin)
-    add_custom_command(OUTPUT ${GEN_DIR}/ovl909_translated.cpp
-      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${GEN_DIR} ${SNATCHER_TRANSLATE_DIR} ovl909
-      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/gen_program.py ${CMAKE_CURRENT_SOURCE_DIR}/../tools/lift/m68k_decode.py ${SNATCHER_TRANSLATE_DIR}/ovl_909.bin)
-    target_sources(scdcore PRIVATE ${GEN_DIR}/ovl909_translated.cpp)
+    lift_program(ovl909 ovl909_translated.cpp ${SNATCHER_TRANSLATE_DIR}/ovl_909.bin)
     target_compile_definitions(scdcore PUBLIC SNATCHER_TRANSLATED_OVL909=1)
   endif()
   if(EXISTS ${SNATCHER_TRANSLATE_DIR}/scd_main_ip.bin)
-    target_sources(scdcore PRIVATE ${GEN_DIR}/main_translated.cpp)
+    lift_program(main main_translated.cpp)
+    lift_program(mainram mainram_translated.cpp)
     target_compile_definitions(scdcore PUBLIC SNATCHER_TRANSLATED_MAIN=1)
   endif()
+  foreach(bin ${LIFT_OVERLAYS})
+    get_filename_component(stem ${bin} NAME_WE)
+    lift_program(ovl:overlays/${stem}.bin ${stem}_translated.cpp ${bin})
+  endforeach()
+  lift_program(ovl_index overlays_index.cpp ${LIFT_OVERLAYS})
   target_compile_definitions(scdcore PUBLIC SNATCHER_TRANSLATED=1)
 endif()
 target_link_libraries(scdcore PUBLIC musashi nuked_opn2)
 
+# ---- Build stamp: the git commit in session manifests. Runs on every build; the header changes only with the commit or dirty state.
+find_package(Git QUIET)
+set(STAMP_DIR ${CMAKE_CURRENT_BINARY_DIR}/stamp)
+add_custom_target(build_stamp
+  COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/.. -DOUT=${STAMP_DIR}/build_stamp.h "-DGIT=${GIT_EXECUTABLE}"
+          -DBUILD_TYPE=${CMAKE_BUILD_TYPE} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_stamp.cmake
+  BYPRODUCTS ${STAMP_DIR}/build_stamp.h
+  VERBATIM)
+
+# ---- Session recording (manifest, session folders): shared by scd_headless and the app (docs/PLAYTEST.md "Sessions").
+add_library(scdsession STATIC src/session/manifest.cpp src/session/session.cpp)
+target_include_directories(scdsession PUBLIC src/session PRIVATE ${STAMP_DIR})
+target_link_libraries(scdsession PUBLIC scdcore)
+add_dependencies(scdsession build_stamp)
+
 # ---- Headless runner (tests, oracle captures)
 add_executable(scd_headless src/frontend/headless.cpp)
-target_link_libraries(scd_headless PRIVATE scdcore)
+target_link_libraries(scd_headless PRIVATE scdsession)
 
 add_executable(replay_test tests/replay_test.cpp)
 target_link_libraries(replay_test PRIVATE scdcore)
 
 add_executable(watchdog_test tests/watchdog_test.cpp)
 target_include_directories(watchdog_test PRIVATE src/scd)
+
+add_executable(checkpoint_test tests/checkpoint_test.cpp)
+target_link_libraries(checkpoint_test PRIVATE scdcore)
+
+add_executable(session_test tests/session_test.cpp)
+target_link_libraries(session_test PRIVATE scdsession)
+
+add_executable(coverage_test tests/coverage_test.cpp)
+target_include_directories(coverage_test PRIVATE src/scd)
+
+add_executable(translate_entry_test tests/translate_entry_test.cpp)
+target_include_directories(translate_entry_test PRIVATE src/scd src/lift)
 
 # ---- SDL3 front-end
 if(NOT SNATCHER_FETCH_SDL)
@@ -92,9 +129,9 @@ endif()
 if(SDL3_FOUND)
   add_executable(snatcher src/frontend/sdl_main.cpp)
   if(TARGET SDL3::SDL3-static)
-    target_link_libraries(snatcher PRIVATE scdcore SDL3::SDL3-static)
+    target_link_libraries(snatcher PRIVATE scdsession SDL3::SDL3-static)
   else()
-    target_link_libraries(snatcher PRIVATE scdcore SDL3::SDL3)
+    target_link_libraries(snatcher PRIVATE scdsession SDL3::SDL3)
   endif()
   if(WIN32)
     target_link_options(snatcher PRIVATE -static -mwindows)

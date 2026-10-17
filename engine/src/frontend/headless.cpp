@@ -1,6 +1,8 @@
 // Headless runner: boots a disc for N frames, optionally dumping frames and audio.
 //   scd_headless <disc.cue> [--frames N] [--ppm-every N --out DIR] [--wav out.wav] [--video out.mp4]
-//                [--press FRAME:BUTTONS:HOLD ...] [--replay FILE [--bram FILE]] [--ckpt-out FILE [--ckpt-every N]] [--watch [--hang-frames N]]
+//                [--press FRAME:BUTTONS:HOLD ...] [--replay FILE [--bram FILE]] [--ckpt-out FILE [--ckpt-every N]] [--manifest-out FILE] [--watch [--hang-frames N]]
+//                [--justifier [--gun FRAME:X,Y,in|out,T|S|TS|- ...]]   (gun state from FRAME on, entries in frame order)
+//                [--session-out DIR [--marker-at FRAME ...]] [--manifest-out FILE]   (SCD_TEST_KILL_AT=<frame>: exit at once, for tests)
 // --video writes a 1440x1080 AAC demo video of the run, H.264 or with --video-codec h265 H.265 (needs ffmpeg, see recorder.h).
 // BUTTONS is a string of U D L R B C A S. Output stays in the directory given by --out.
 #include <algorithm>
@@ -8,30 +10,22 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
+#include "checkpoint.h"
+#include "debug_dump.h"
+#include "manifest.h"
 #include "recorder.h"
 #include "replay.h"
+#include "session.h"
 #include "system.h"
 #include "watchdog.h"
 
 using namespace scd;
 
 namespace {
-
-void write_ppm(const std::string& path, const uint32_t* fb, int w, int h) {
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return;
-    std::fprintf(f, "P6\n%d %d\n255\n", w, h);
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            uint32_t p = fb[y * 320 + x];
-            unsigned char rgb[3] = {uint8_t(p >> 16), uint8_t(p >> 8), uint8_t(p)};
-            std::fwrite(rgb, 1, 3, f);
-        }
-    std::fclose(f);
-}
 
 void write_wav(const std::string& path, const std::vector<int16_t>& s) {
     FILE* f = std::fopen(path.c_str(), "wb");
@@ -48,6 +42,7 @@ void write_wav(const std::string& path, const std::vector<int16_t>& s) {
 }
 
 struct Press { int frame; uint16_t buttons; int hold; };
+struct GunPress { uint64_t frame; GunState gun; };
 
 uint16_t parse_buttons(const std::string& s) {
     uint16_t b = 0;
@@ -60,24 +55,6 @@ uint16_t parse_buttons(const std::string& s) {
     return b;
 }
 
-// Everything needed to look at a watchdog trip later: what tripped, both CPUs' PCs, the screen, RAM, and the input that got here.
-void write_failure_bundle(System& sys, const std::string& out, const Replay& trace, const WatchVerdict& v) {
-    uint32_t mpc, spc;
-    sys.cpu_pcs(&mpc, &spc);
-    const char* kind = v.kind == WatchVerdict::kHang ? "hang" : "halted";
-    if (FILE* f = std::fopen((out + "/report.json").c_str(), "w")) {
-        std::fprintf(f, "{\"kind\":\"%s\",\"frame\":%llu,\"since\":%llu,\"e020\":\"0x%04x\",\"e022\":\"0x%04x\",\"e06c\":\"0x%04x\",\"main_pc\":\"0x%06x\",\"sub_pc\":\"0x%06x\"}\n",
-                     kind, (unsigned long long)sys.frame_count(), (unsigned long long)v.since, sys.e020(), sys.e022(), sys.e06c(), mpc, spc);
-        std::fclose(f);
-    }
-    write_ppm(out + "/final.ppm", sys.framebuffer(), sys.width(), sys.height());
-    if (FILE* f = std::fopen((out + "/mainram.bin").c_str(), "wb")) { std::fwrite(sys.main_ram(), 1, 0x10000, f); std::fclose(f); }
-    if (FILE* f = std::fopen((out + "/subram.bin").c_str(), "wb")) { std::fwrite(sys.prg_ram() + 0x7000, 1, 0x6000, f); std::fclose(f); }
-    if (FILE* f = std::fopen((out + "/repro.replay").c_str(), "w")) { std::fputs(trace.serialize().c_str(), f); std::fclose(f); }
-    sys.dump_state();
-    std::fprintf(stderr, "[watch] %s at frame %llu (e020=%04x main_pc=%06x sub_pc=%06x); bundle in %s\n", kind, (unsigned long long)sys.frame_count(), sys.e020(), mpc, spc, out.c_str());
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -86,10 +63,13 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::string cue = argv[1], out = ".", wav, video, codec = "h264";
+    const std::string started = iso8601_local(std::time(nullptr));
     int frames = 600, ppm_every = 0, ckpt_every = 300, hang_frames = 300;
-    bool watch = false;
-    std::string replay_path, ckpt_path, bram;
+    bool watch = false, justifier = false;
+    std::string replay_path, ckpt_path, bram, manifest_path, session_out;
     std::vector<Press> presses;
+    std::vector<GunPress> guns;
+    std::vector<uint64_t> marker_at;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
@@ -102,13 +82,31 @@ int main(int argc, char** argv) {
         else if (a == "--ckpt-out" && i + 1 < argc) ckpt_path = argv[++i];
         else if (a == "--ckpt-every" && i + 1 < argc) ckpt_every = std::atoi(argv[++i]);
         else if (a == "--bram" && i + 1 < argc) bram = argv[++i];
+        else if (a == "--manifest-out" && i + 1 < argc) manifest_path = argv[++i];
+        else if (a == "--session-out" && i + 1 < argc) session_out = argv[++i];
+        else if (a == "--marker-at" && i + 1 < argc) marker_at.push_back(std::strtoull(argv[++i], nullptr, 10));
         else if (a == "--watch") watch = true;
         else if (a == "--hang-frames" && i + 1 < argc) hang_frames = std::atoi(argv[++i]);
+        else if (a == "--justifier") justifier = true;
+        else if (a == "--gun" && i + 1 < argc) {
+            const std::string g = argv[++i];
+            const size_t colon = g.find(':');
+            GunState gs;
+            if (colon == std::string::npos || colon == 0 || !gun_from_string(g.substr(colon + 1), &gs)) {
+                std::fprintf(stderr, "error: bad --gun %s (expected FRAME:X,Y,in|out,T|S|TS|-)\n", g.c_str());
+                return 2;
+            }
+            guns.push_back({std::strtoull(g.c_str(), nullptr, 10), gs});
+        }
         else if (a == "--press" && i + 1 < argc) {
             int f, h;
             char b[16];
             if (std::sscanf(argv[++i], "%d:%15[^:]:%d", &f, b, &h) == 3) presses.push_back({f, parse_buttons(b), h});
         }
+    }
+    if (!session_out.empty() && (watch || !replay_path.empty())) {
+        std::fprintf(stderr, "error: --session-out records a session; it cannot be combined with --watch or --replay\n");
+        return 2;
     }
     if (const char* lf = std::getenv("SCD_LOG")) {   // debug log file, same as the app's --log
         if (!System::instance().open_log(lf)) { std::fprintf(stderr, "error: cannot open %s\n", lf); return 1; }
@@ -132,10 +130,12 @@ int main(int argc, char** argv) {
         if (!Replay::parse(text, &replay, &err)) { std::fprintf(stderr, "error: %s: %s\n", replay_path.c_str(), err.c_str()); return 1; }
         std::string dsha = disc_sha1_from_cue(cue);
         if (!replay.disc_sha1.empty() && replay.disc_sha1 != dsha) { std::fprintf(stderr, "error: replay was recorded for disc %s, this disc is %s\n", replay.disc_sha1.c_str(), dsha.c_str()); return 4; }
-        if (replay.justifier) { std::fprintf(stderr, "error: replay was recorded with the Justifier; gun input is not recorded, so it cannot be replayed\n"); return 4; }
+        if (replay.justifier && replay.version < 2) { std::fprintf(stderr, "error: replay was recorded with the Justifier in format v1, which has no gun input, so it cannot be replayed\n"); return 4; }
+        if (replay.justifier) justifier = true;   // v2: System::run_frame applies the recorded gun state
         sys.set_cd_speed(replay.cd_speed);
         if (replay.bram_sha1 != bram_sha_at_start) { std::fprintf(stderr, "error: replay needs backup RAM %s, got %s (pass --bram)\n", replay.bram_sha1.c_str(), bram_sha_at_start.c_str()); return 4; }
     }
+    if (justifier) sys.set_gun_connected(true);   // before the first frame: the game reads the controller ID at boot
     if (!sys.init(std::move(disc), bram, &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     if (!replay_path.empty()) sys.set_replay_play(&replay);
@@ -143,26 +143,42 @@ int main(int argc, char** argv) {
     const uint64_t stick_from = std::getenv("SCD_TEST_STICK_E020") ? std::strtoull(std::getenv("SCD_TEST_STICK_E020"), nullptr, 10) : 0;
     uint16_t stuck_val = 0;
     bool stuck_set = false;
+    auto sampled_e020 = [&]() -> uint16_t {   // SCD_TEST_STICK_E020: test hook, pins the watchdog's sample only
+        uint16_t e20 = sys.e020();
+        if (stick_from && sys.frame_count() >= stick_from) { if (!stuck_set) { stuck_val = e20; stuck_set = true; } e20 = stuck_val; }
+        return e20;
+    };
+    const uint64_t kill_at = std::getenv("SCD_TEST_KILL_AT") ? std::strtoull(std::getenv("SCD_TEST_KILL_AT"), nullptr, 10) : 0;
     Replay trace;   // the pad stream actually applied, for the failure bundle's repro.replay
     if (watch) {
         trace.disc_sha1 = disc_sha1_from_cue(cue);
         trace.bram_sha1 = bram_sha_at_start;
+        trace.justifier = justifier;
         trace.engine = "scd_headless --watch";
         sys.set_replay_record(&trace);
     }
+    Session session;   // --session-out: the app's session writer, driven by --press / --gun (tests)
+    if (!session_out.empty()) {
+        SessionConfig sc;
+        sc.cue = cue;
+        sc.bram_path = bram;
+        sc.engine = "scd_headless --session-out";
+        sc.cd_speed = sys.cd_speed();
+        sc.justifier = justifier;
+        sc.ckpt_every = ckpt_every;
+        sc.hang_frames = hang_frames;
+        sc.manifest.app = "scd_headless";
+        sc.manifest.os = host_os();
+        for (int i = 2; i < argc; ++i) sc.manifest.args.push_back(argv[i]);
+        if (!session.begin(sys, sc, session_out, &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    }
     FILE* ckpt = nullptr;
-    uint16_t last22 = 0xFFFF, last6c = 0xFFFF;
     if (!ckpt_path.empty() && !(ckpt = std::fopen(ckpt_path.c_str(), "w"))) { std::fprintf(stderr, "error: cannot open %s\n", ckpt_path.c_str()); return 1; }
-    uint64_t last_emitted = ~0ull;
-    auto emit_ckpt = [&]() {
-        if (sys.frame_count() == last_emitted) return;   // the backstop and the exit line can land on the same frame
-        last_emitted = sys.frame_count();
-        StateHash h = sys.state_hash();
-        std::fprintf(ckpt, "@0x%llx scene=E022:%04x/E06C:%04x vram=%016llx ram=%016llx fb=%016llx\n", (unsigned long long)sys.frame_count(),
-                     sys.e022(), sys.e06c(), (unsigned long long)h.vram, (unsigned long long)h.ram, (unsigned long long)h.fb);
-    };
+    Checkpointer ckpts(ckpt_every);
 
     const int profile_from = std::getenv("SCD_PROFILE") ? std::atoi(std::getenv("SCD_PROFILE")) : -1;
+    const char* coverage_path = std::getenv("SCD_COVERAGE");   // ADR-003 fallback census, written on every exit (watchdog trips included)
+    auto write_census = [&] { if (coverage_path) sys.write_coverage(coverage_path); };
     if (const char* t = std::getenv("SCD_TRACE")) {  // cpu:frame:count
         int cpu, n; unsigned long long fr;
         if (std::sscanf(t, "%d:%llu:%d", &cpu, &fr, &n) == 3) sys.set_trace(cpu, fr, n);
@@ -190,27 +206,32 @@ int main(int argc, char** argv) {
         for (auto& p : presses) if (f >= p.frame && f < p.frame + p.hold) pad |= p.buttons;
         if (profile_from >= 0 && f == frames - profile_from) sys.enable_profile(true);
         sys.set_pad(0, pad);
+        if (justifier && !guns.empty()) {   // --gun: the last entry whose frame has been reached
+            GunState g;
+            for (auto& gp : guns) if (uint64_t(f) >= gp.frame) g = gp.gun;
+            sys.set_gun(g.x, g.y, g.inside, g.buttons);
+        }
         auto t0 = std::chrono::steady_clock::now();
         sys.run_frame();
         if (frametime) ft.push_back({std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), f + 1});
         rec.frame(sys.framebuffer(), sys.width(), sys.height(), sys.audio());
+        if (session.active()) {
+            session.after_frame(sys, sampled_e020(), sys.frame_count() * 1000 / 60);   // emulated clock: a flush per second of play, deterministic
+            for (uint64_t m : marker_at) if (m == sys.frame_count()) session.marker(sys);
+            if (kill_at && sys.frame_count() == kill_at) std::_Exit(70);   // SCD_TEST_KILL_AT: a killed app (no cleanup)
+        }
         if (watch) {
-            uint16_t e20 = sys.e020();
-            if (stick_from && sys.frame_count() >= stick_from) { if (!stuck_set) { stuck_val = e20; stuck_set = true; } e20 = stuck_val; }   // SCD_TEST_STICK_E020: test hook, samples only
-            WatchVerdict v = dog.feed({sys.frame_count(), e20, sys.state_hash().fb, sys.halted()});
+            WatchVerdict v = dog.feed({sys.frame_count(), sampled_e020(), sys.state_hash().fb, sys.halted()});
             if (v.kind == WatchVerdict::kStillScreen) std::fprintf(stderr, "[watch] warning: screen unchanged since frame %llu\n", (unsigned long long)v.since);
             else if (v.kind != WatchVerdict::kOk) {
-                if (ckpt) { emit_ckpt(); std::fclose(ckpt); }
+                if (ckpt) { std::fputs(ckpts.final_line(sys).c_str(), ckpt); std::fclose(ckpt); }
+                write_census();
                 write_failure_bundle(sys, out, trace, v);
                 sys.shutdown();
                 return 3;
             }
         }
-        if (ckpt) {
-            bool changed = sys.e022() != last22 || sys.e06c() != last6c;
-            if (changed || (ckpt_every > 0 && sys.frame_count() % ckpt_every == 0)) emit_ckpt();
-            last22 = sys.e022(); last6c = sys.e06c();
-        }
+        if (ckpt) std::fputs(ckpts.after_frame(sys).c_str(), ckpt);
         if (!wav.empty()) {
             all_audio.insert(all_audio.end(), sys.audio().begin(), sys.audio().end());
         }
@@ -261,7 +282,8 @@ int main(int argc, char** argv) {
             write_ppm(out + name, sys.framebuffer(), sys.width(), sys.height());
         }
     }
-    if (ckpt) { emit_ckpt(); std::fclose(ckpt); }
+    if (ckpt) { std::fputs(ckpts.final_line(sys).c_str(), ckpt); std::fclose(ckpt); }
+    if (session.active()) session.end(sys, sys.halted() ? "halted" : "quit");
     if (frametime && !ft.empty()) {
         double sum = 0; int over = 0;
         for (auto& [ms, fr] : ft) { sum += ms; over += ms > 1000.0 / 59.9227; }
@@ -296,6 +318,25 @@ int main(int argc, char** argv) {
         if (!rec.finish(&err)) std::fprintf(stderr, "error: %s\n", err.c_str());
     }
     std::printf("ran %llu frames%s\n", (unsigned long long)sys.frame_count(), sys.halted() ? " (halted)" : "");
+    if (!manifest_path.empty()) {   // run.py --session compares this build kind with the session's
+        Manifest m;
+        m.app = "scd_headless";
+        m.build = sys.translated() ? "translated" : "interpreter";
+        m.os = host_os();
+        for (int i = 2; i < argc; ++i) m.args.push_back(argv[i]);
+        m.cd_speed = sys.cd_speed();
+        m.justifier = justifier;
+        m.ckpt_every = ckpt_every;
+        m.disc_sha1 = disc_sha1_from_cue(cue);
+        m.bram_sha1 = bram_sha_at_start;
+        m.started = started;
+        m.ended = iso8601_local(std::time(nullptr));
+        m.has_frames = true;
+        m.frames = sys.frame_count();
+        m.exit = sys.halted() ? "halted" : "quit";
+        if (!write_text(manifest_path, manifest_json(m))) std::fprintf(stderr, "error: cannot write %s\n", manifest_path.c_str());
+    }
+    write_census();
     sys.shutdown();
     return 0;
 }

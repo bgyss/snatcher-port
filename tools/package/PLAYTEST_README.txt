@@ -63,12 +63,13 @@ Please note for anything that looks or sounds wrong, or crashes:
   - what happened, and what you expected,
   - your Mac model and macOS version.
 A screenshot (Cmd-Shift-4) or a short F9 recording helps a lot.
-If the game freezes, goes black, or won't advance, please send the debug log. Start it with --log:
-  open Snatcher.app --args "/path/to/Snatcher.cue" --log
-The log is written to ~/Library/Application Support/snatcher-port/snatcher/debug.log (it is replaced each launch,
-so copy it before relaunching). It records the machine/SDL/audio setup, every CD read, music start/stop, your key
-presses, game-state changes and a status line every 5 seconds. Pressing F10 at the moment it hangs adds a full state
-snapshot. It contains no game data.
+Every launch records a session folder in
+  ~/Library/Application Support/snatcher-port/snatcher/sessions/<date-time>/
+with your input, a debug log and status checkpoints, so the developer can replay exactly what you played.
+Press F8 the moment something looks wrong (the picture flashes a white frame) and write down what you saw
+with the marker number; a freeze is detected and recorded by itself. Please zip and send the whole folder of
+that session privately: it contains screenshots and memory snapshots of the game and your save, so do not post
+it publicly. (--no-session turns recording off.)
 If the picture stutters, start it from Terminal with
   SNATCHER_FPS=1 /path/to/Snatcher.app/Contents/MacOS/Snatcher "/path/to/Snatcher.cue"
 and send the lines it prints.

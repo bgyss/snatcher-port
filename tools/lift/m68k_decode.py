@@ -8,6 +8,7 @@ decode(read16, pc) -> Insn with .size (bytes), .code (list of C++ statements), .
   ('jump_dyn',)     computed jump (target in C++ variable `tgt`)
   ('call_dyn',)     computed call
   ('ret',) ('rte',) ('stop',)
+  ('exc',)          the code sets npc (next instruction, or a handler after an exception); descent continues at pc+size
 Generated statements use the runtime in engine/src/lift/cpu68k.h (variable `c` is lift::Cpu&, `B` the bus).
 """
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ class Insn:
     text: str = ''
     code: list = field(default_factory=list)
     flow: object = 'next'
+    sr_write: bool = False      # writes SR: may return Exit::Irq (ADR-003 M2)
 
 
 class Unsupported(Exception):
@@ -31,6 +33,11 @@ class Unsupported(Exception):
 def s16(v): return v - 0x10000 if v & 0x8000 else v
 def s8(v): return v - 0x100 if v & 0x80 else v
 def hx(v): return '0x%X' % (v & 0xFFFFFFFF)
+
+
+# A privileged instruction in user mode leaves translated code: Musashi takes the privilege violation (the game runs in supervisor
+# mode, JOURNAL "Recomp M2 investigation"). It must come before any side effect of the instruction.
+PRIV = 'if (!(c.sr_sys & 0x2000)) return lift::Exit{%s, lift::Exit::Unsupported};'
 
 
 class Ctx:
@@ -145,6 +152,7 @@ def decode(read16, pc):
         ins.code = ['/* unsupported: %s */' % e, 'return lift::Exit{%s, lift::Exit::Unsupported};' % hx(pc)]
         ins.flow = ('stop',)
         ins.size = 2
+        ins.sr_write = False
         return ins
     ins.size = ctx.pos - pc
     return ins
@@ -215,12 +223,17 @@ def _decode(ctx, op, top, ins, code):
             s = ctx.t(); code.append('uint32_t %s = %s;' % (s, src.read()))
             if top == 8:
                 signed = bool(op & 0x100)
-                code.append('{ if (%s == 0) return lift::Exit{%s, lift::Exit::DivZero}; ' % (s, hx(pc)) +
-                    ('int32_t dd = int32_t(c.d[%d]); int32_t dv = int16_t(%s); int64_t q = dd / dv; int32_t r = dd %% dv; ' % (r9, s) +
-                     'if (q > 32767 || q < -32768) { c.v = true; } else { c.d[%d] = (uint32_t(uint16_t(r)) << 16) | uint16_t(q); c.n = q < 0; c.z = q == 0; c.v = false; c.c = false; } }' % r9
-                     if signed else
-                     'uint32_t dd = c.d[%d]; uint32_t dv = %s & 0xFFFF; uint32_t q = dd / dv; uint32_t r = dd %% dv; ' % (r9, s) +
-                     'if (q > 0xFFFF) { c.v = true; } else { c.d[%d] = (r << 16) | q; c.n = q & 0x8000; c.z = q == 0; c.v = false; c.c = false; } }' % r9))
+                nxt = hx(ctx.pos)
+                # $80000000 / -1 overflows int32 (UB); Musashi special-cases it: d = 0, Z set, N/V/C clear
+                body = (('if (c.d[%d] == 0x80000000u && int16_t(%s) == -1) { c.d[%d] = 0; c.n = false; c.z = true; c.v = false; c.c = false; } else { ' % (r9, s, r9) +
+                         'int32_t dd = int32_t(c.d[%d]); int32_t dv = int16_t(%s); int64_t q = dd / dv; int32_t r = dd %% dv; ' % (r9, s) +
+                         'if (q > 32767 || q < -32768) { c.v = true; } else { c.d[%d] = (uint32_t(uint16_t(r)) << 16) | uint16_t(q); c.n = q < 0; c.z = q == 0; c.v = false; c.c = false; } }' % r9)
+                        if signed else
+                        ('uint32_t dd = c.d[%d]; uint32_t dv = %s & 0xFFFF; uint32_t q = dd / dv; uint32_t r = dd %% dv; ' % (r9, s) +
+                         'if (q > 0xFFFF) { c.v = true; } else { c.d[%d] = (r << 16) | q; c.n = q & 0x8000; c.z = q == 0; c.v = false; c.c = false; }' % r9))
+                # divide by zero: vector 5, the frame holds the next instruction, flags unchanged (Musashi)
+                code.append('if (%s == 0) { npc = lift::exception_entry(c, 5, %s); } else { %s npc = %s; }' % (s, nxt, body, nxt))
+                ins.flow = ('exc',)
             else:
                 if op & 0x100: code.append('c.d[%d] = uint32_t(int32_t(int16_t(c.d[%d])) * int32_t(int16_t(%s))); lift::flags_logic<4>(c, c.d[%d]);' % (r9, r9, s, r9))
                 else: code.append('c.d[%d] = uint32_t(uint16_t(c.d[%d])) * uint32_t(uint16_t(%s)); lift::flags_logic<4>(c, c.d[%d]);' % (r9, r9, s, r9))
@@ -366,12 +379,15 @@ def _group0(ctx, op, ins, code):
     B = SZ[sz]
     if B == 4: imm = ctx.ext32()
     else: imm = ctx.ext() & (0xFF if B == 1 else 0xFFFF)
-    if mode == 7 and reg == 4:  # to ccr / sr
+    if mode == 7 and reg == 4:  # ori/andi/eori to ccr (byte) or sr (word)
         if B == 4 or kind in (2, 3, 6): raise Unsupported('imm to imm')
-        if kind == 0: code.append('c.set_ccr(c.ccr() | %s);' % hx(imm & 0x1F)) if B == 1 else code.append('c.set_ccr(c.ccr() | %s); c.sr_sys |= %s;' % (hx(imm & 0x1F), hx(imm & 0xA700)))
-        elif kind == 1: code.append('c.set_ccr(c.ccr() & %s);' % hx(imm & 0x1F)) if B == 1 else code.append('c.set_ccr(c.ccr() & %s); c.sr_sys &= %s;' % (hx(imm & 0x1F), hx(imm & 0xA700)))
-        elif kind == 5: code.append('c.set_ccr(c.ccr() ^ %s);' % hx(imm & 0x1F))
-        else: raise Unsupported('imm to ccr kind')
+        opx = {0: '|', 1: '&', 5: '^'}[kind]
+        if B == 1:
+            code.append('c.set_ccr(c.ccr() %s %s);' % (opx, hx(imm & 0x1F)))
+            return
+        code.append(PRIV % hx(ctx.pc))
+        code.append('if (lift::set_sr(c, (c.sr_sys | c.ccr()) %s %s)) return lift::Exit{%s, lift::Exit::Irq};' % (opx, hx(imm), hx(ctx.pos)))
+        ins.sr_write = True
         return
     check(mode, reg, 'alt')
     ea = Operand(ctx, code, mode, reg, B)
@@ -405,14 +421,19 @@ def _group4(ctx, op, ins, code):
     if op == 0x4E71: return
     if op == 0x4E75:
         ins.flow = ('ret',); return
-    if op == 0x4E73:
-        ins.flow = ('rte',); return
+    if op == 0x4E73:  # rte: code in emit.flow_code
+        ins.flow = ('rte',); ins.sr_write = True; return
     if op == 0x4E77:
         code.append('{ uint32_t f = c.bus->r16(c.a[7]); c.a[7] += 2; c.set_ccr(f); uint32_t t = c.bus->r32(c.a[7]); c.a[7] += 4; tgt = t; }'); ins.flow = ('jump_dyn',); return
-    if op == 0x4E72: raise Unsupported('stop')
+    if op == 0x4E72:  # stop #imm: set SR, then idle until an interrupt (an already deliverable one exits with Exit::Irq)
+        imm = ctx.ext()
+        code.append(PRIV % hx(pc))
+        code.append('if (lift::set_sr(c, %s)) return lift::Exit{%s, lift::Exit::Irq};' % (hx(imm), hx(pc + 4)))
+        code.append('return lift::Exit{%s, lift::Exit::Stop};' % hx(pc + 4))
+        ins.flow = ('exc',); ins.sr_write = True; return
     if op == 0x4AFC: raise Unsupported('illegal')
-    if op & 0xFFF0 == 0x4E40:
-        code.append('return lift::Exit{%s, lift::Exit::Trap, %d};' % (hx(pc), op & 15)); ins.flow = ('stop',); return
+    if op & 0xFFF0 == 0x4E40:  # trap #n: vector 32 + n, the frame holds the next instruction
+        code.append('npc = lift::exception_entry(c, %d, %s);' % (32 + (op & 15), hx(pc + 2))); ins.flow = ('exc',); return
     if op & 0xFFF8 == 0x4E50:
         d = s16(ctx.ext()); code.append('c.a[7] -= 4; c.bus->w32(c.a[7], c.a[%d]); c.a[%d] = c.a[7]; c.a[7] += (%d);' % (reg, reg, d)); return
     if op & 0xFFF8 == 0x4E58:
@@ -454,8 +475,12 @@ def _group4(ctx, op, ins, code):
         ea = Operand(ctx, code, mode, reg, 2); code.append(ea.write('(c.sr_sys | c.ccr())')); return
     if (op & 0xFFC0) == 0x44C0:  # move to ccr
         ea = Operand(ctx, code, mode, reg, 2); code.append('c.set_ccr(%s);' % ea.read()); return
-    if (op & 0xFFC0) == 0x46C0:  # move to sr
-        ea = Operand(ctx, code, mode, reg, 2); v = ctx.t(); code.append('uint32_t %s = %s; c.set_ccr(%s); c.sr_sys = %s & 0xA700;' % (v, ea.read(), v, v)); return
+    if (op & 0xFFC0) == 0x46C0:  # move to sr: the privilege check comes before the EA's side effects ((sp)+)
+        check(mode, reg, 'data')
+        code.append(PRIV % hx(pc))
+        ea = Operand(ctx, code, mode, reg, 2); v = ctx.t()
+        code.append('uint32_t %s = %s; if (lift::set_sr(c, %s)) return lift::Exit{%s, lift::Exit::Irq};' % (v, ea.read(), v, hx(ctx.pos)))
+        ins.sr_write = True; return
     sz = (op >> 6) & 3
     h = op & 0xFF00
     if h in (0x4200, 0x4400, 0x4000, 0x4600, 0x4A00) and sz != 3:
@@ -476,8 +501,13 @@ def _group4(ctx, op, ins, code):
         check(mode, reg, 'alt'); ea = Operand(ctx, code, mode, reg, 1); v = ctx.t(); code.append('uint32_t %s = %s;' % (v, ea.read())); ccr_logic(code, 1, v); code.append(ea.write('%s | 0x80' % v)); return
     if (op & 0xFFC0) == 0x4800:  # nbcd
         check(mode, reg, 'alt'); ea = Operand(ctx, code, mode, reg, 1); v = ctx.t(); code.append('uint32_t %s = %s;' % (v, ea.read())); code.append(ea.write('lift::nbcd(c, %s)' % v)); return
-    if (op & 0xF1C0) == 0x4180:  # chk
-        raise Unsupported('chk')
+    if (op & 0xF1C0) == 0x4180:  # chk.w <ea>,Dn: Z from Dn, V and C cleared, N only when it traps (Musashi)
+        check(mode, reg, 'data')
+        ea = Operand(ctx, code, mode, reg, 2); b = ctx.t()
+        code.append('uint32_t %s = %s;' % (b, ea.read()))
+        code.append('{ int32_t v = int16_t(c.d[%d]), lim = int16_t(%s); c.z = v == 0; c.v = false; c.c = false; '
+                    'if (v >= 0 && v <= lim) npc = %s; else { c.n = v < 0; npc = lift::exception_entry(c, 6, %s); } }' % (r9, b, hx(ctx.pos), hx(ctx.pos)))
+        ins.flow = ('exc',); return
     raise Unsupported('group4 %04x' % op)
 
 
