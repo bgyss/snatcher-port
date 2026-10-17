@@ -49,7 +49,7 @@ If the directory cannot be created, the app prints an error and continues withou
 | `markers/NNN-f<frame>/` | on F8 / F10 | `marker.json`, `screen.ppm`, `mainram.bin`, `subram.bin`, `state.txt` |
 | `failure/NNN-<kind>-f<frame>/` | on a watchdog trip | the headless failure bundle: `report.json`, `final.ppm`, `mainram.bin`, `subram.bin`, `repro.replay`, `state.txt` |
 
-All files hold the user's own input, hashes, screenshots and RAM: they are disc-derived or personal and stay out of git (`work/` is gitignored). Only `session.replay` and `session.ckpt` may be copied into `tools/playtest/replays/` (as today with `.replay`/`.ckpt`), and only for sessions without `bram` dependence or with the `.bram` kept local.
+All files hold the user's own input, hashes, screenshots and RAM: they are disc-derived or personal and stay out of git (`work/` is gitignored). Only `session.replay` and `session.ckpt` may be copied into `tools/playtest/replays/` (as today with `.replay`/`.ckpt`). The matching `.bram` is the user's save data: it stays local next to the replay and is never committed.
 
 ### manifest.json
 
