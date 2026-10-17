@@ -1,6 +1,7 @@
 // Headless runner: boots a disc for N frames, optionally dumping frames and audio.
 //   scd_headless <disc.cue> [--frames N] [--ppm-every N --out DIR] [--wav out.wav] [--video out.mp4]
 //                [--press FRAME:BUTTONS:HOLD ...] [--replay FILE [--bram FILE]] [--ckpt-out FILE [--ckpt-every N]] [--watch [--hang-frames N]]
+//                [--justifier [--gun FRAME:X,Y,in|out,T|S|TS|- ...]]   (gun state from FRAME on, entries in frame order)
 // --video writes a 1440x1080 AAC demo video of the run, H.264 or with --video-codec h265 H.265 (needs ffmpeg, see recorder.h).
 // BUTTONS is a string of U D L R B C A S. Output stays in the directory given by --out.
 #include <algorithm>
@@ -48,6 +49,7 @@ void write_wav(const std::string& path, const std::vector<int16_t>& s) {
 }
 
 struct Press { int frame; uint16_t buttons; int hold; };
+struct GunPress { uint64_t frame; GunState gun; };
 
 uint16_t parse_buttons(const std::string& s) {
     uint16_t b = 0;
@@ -87,9 +89,10 @@ int main(int argc, char** argv) {
     }
     std::string cue = argv[1], out = ".", wav, video, codec = "h264";
     int frames = 600, ppm_every = 0, ckpt_every = 300, hang_frames = 300;
-    bool watch = false;
+    bool watch = false, justifier = false;
     std::string replay_path, ckpt_path, bram;
     std::vector<Press> presses;
+    std::vector<GunPress> guns;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
@@ -104,6 +107,17 @@ int main(int argc, char** argv) {
         else if (a == "--bram" && i + 1 < argc) bram = argv[++i];
         else if (a == "--watch") watch = true;
         else if (a == "--hang-frames" && i + 1 < argc) hang_frames = std::atoi(argv[++i]);
+        else if (a == "--justifier") justifier = true;
+        else if (a == "--gun" && i + 1 < argc) {
+            const std::string g = argv[++i];
+            const size_t colon = g.find(':');
+            GunState gs;
+            if (colon == std::string::npos || colon == 0 || !gun_from_string(g.substr(colon + 1), &gs)) {
+                std::fprintf(stderr, "error: bad --gun %s (expected FRAME:X,Y,in|out,T|S|TS|-)\n", g.c_str());
+                return 2;
+            }
+            guns.push_back({std::strtoull(g.c_str(), nullptr, 10), gs});
+        }
         else if (a == "--press" && i + 1 < argc) {
             int f, h;
             char b[16];
@@ -132,10 +146,12 @@ int main(int argc, char** argv) {
         if (!Replay::parse(text, &replay, &err)) { std::fprintf(stderr, "error: %s: %s\n", replay_path.c_str(), err.c_str()); return 1; }
         std::string dsha = disc_sha1_from_cue(cue);
         if (!replay.disc_sha1.empty() && replay.disc_sha1 != dsha) { std::fprintf(stderr, "error: replay was recorded for disc %s, this disc is %s\n", replay.disc_sha1.c_str(), dsha.c_str()); return 4; }
-        if (replay.justifier) { std::fprintf(stderr, "error: replay was recorded with the Justifier; gun input is not recorded, so it cannot be replayed\n"); return 4; }
+        if (replay.justifier && replay.version < 2) { std::fprintf(stderr, "error: replay was recorded with the Justifier in format v1, which has no gun input, so it cannot be replayed\n"); return 4; }
+        if (replay.justifier) justifier = true;   // v2: System::run_frame applies the recorded gun state
         sys.set_cd_speed(replay.cd_speed);
         if (replay.bram_sha1 != bram_sha_at_start) { std::fprintf(stderr, "error: replay needs backup RAM %s, got %s (pass --bram)\n", replay.bram_sha1.c_str(), bram_sha_at_start.c_str()); return 4; }
     }
+    if (justifier) sys.set_gun_connected(true);   // before the first frame: the game reads the controller ID at boot
     if (!sys.init(std::move(disc), bram, &err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     if (!replay_path.empty()) sys.set_replay_play(&replay);
@@ -147,6 +163,7 @@ int main(int argc, char** argv) {
     if (watch) {
         trace.disc_sha1 = disc_sha1_from_cue(cue);
         trace.bram_sha1 = bram_sha_at_start;
+        trace.justifier = justifier;
         trace.engine = "scd_headless --watch";
         sys.set_replay_record(&trace);
     }
@@ -192,6 +209,11 @@ int main(int argc, char** argv) {
         for (auto& p : presses) if (f >= p.frame && f < p.frame + p.hold) pad |= p.buttons;
         if (profile_from >= 0 && f == frames - profile_from) sys.enable_profile(true);
         sys.set_pad(0, pad);
+        if (justifier && !guns.empty()) {   // --gun: the last entry whose frame has been reached
+            GunState g;
+            for (auto& gp : guns) if (uint64_t(f) >= gp.frame) g = gp.gun;
+            sys.set_gun(g.x, g.y, g.inside, g.buttons);
+        }
         auto t0 = std::chrono::steady_clock::now();
         sys.run_frame();
         if (frametime) ft.push_back({std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), f + 1});

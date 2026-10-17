@@ -4,6 +4,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CUE = ROOT / "sega-cd-eng" / "Snatcher (Sega CD) (U)-redump.cue"
 HEADLESS = os.environ.get("SCD_HEADLESS", str(ROOT / "engine" / "build-pt" / "scd_headless"))
 needs_disc = unittest.skipUnless(CUE.exists(), "disc not present")
+needs_headless = unittest.skipUnless(pathlib.Path(HEADLESS).exists(), "scd_headless not built")
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 
@@ -80,6 +81,52 @@ class TestReplayRefusal(unittest.TestCase):
         r = self._run("# snatcher-replay v1\n@0x10 Z\n")
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("line 2", r.stderr)
+
+
+class TestGun(unittest.TestCase):
+    @needs_headless
+    def test_bad_gun_option_rejected(self):
+        r = run_headless("--frames", "5", "--justifier", "--gun", "10:1,2,sideways,T")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("bad --gun", r.stderr)
+
+    @needs_disc
+    def test_v2_justifier_replay_accepted(self):
+        out = ROOT / "work" / "pt_gun"
+        out.mkdir(parents=True, exist_ok=True)
+        rp = out / "v2.replay"
+        rp.write_text("# snatcher-replay v2\ndisc sha1=\nbram sha1=none\njustifier on\ng0x10 100,80,in,T\n")
+        r = run_headless("--frames", "30", "--out", str(out), "--replay", str(rp))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    @needs_disc
+    def test_gun_replay_matches_live_gun(self):
+        # --gun sets the gun before run_frame (as the app does); the replay applies it at frame start: same frames, same state.
+        out = ROOT / "work" / "pt_gun"
+        out.mkdir(parents=True, exist_ok=True)
+        a, b, rp = out / "live.ckpt", out / "replayed.ckpt", out / "gun.replay"
+        r = run_headless("--frames", "1200", "--out", str(out), "--ckpt-out", str(a), "--justifier",
+                         "--gun", "300:100,80,in,T", "--gun", "306:100,80,in,-", "--gun", "700:20,30,out,S", "--gun", "706:20,30,out,-")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rp.write_text("# snatcher-replay v2\ndisc sha1=\nbram sha1=none\njustifier on\n"
+                      "g0x12c 100,80,in,T\ng0x132 100,80,in,-\ng0x2bc 20,30,out,S\ng0x2c2 20,30,out,-\n")
+        r = run_headless("--frames", "1200", "--out", str(out), "--ckpt-out", str(b), "--replay", str(rp))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(a.read_text(), b.read_text())
+
+    @needs_disc
+    def test_watch_trace_records_gun(self):
+        out = ROOT / "work" / "pt_gun_hang"
+        out.mkdir(parents=True, exist_ok=True)
+        for f in out.glob("*"):
+            f.unlink()
+        r = run_headless("--frames", "100", "--out", str(out), "--watch", "--hang-frames", "30", "--justifier",
+                         "--gun", "10:100,80,in,T", env={"SCD_TEST_STICK_E020": "20"})
+        self.assertEqual(r.returncode, 3, r.stderr)
+        text = (out / "repro.replay").read_text()
+        self.assertTrue(text.startswith("# snatcher-replay v2\n"), text)
+        self.assertIn("justifier on\n", text)
+        self.assertIn("g0xa 100,80,in,T\n", text)
 
 
 class TestWatch(unittest.TestCase):

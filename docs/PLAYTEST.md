@@ -20,6 +20,17 @@ Play, then quit (Cmd-Q or close the window). This writes `work/session.replay` (
 
 Compare two builds with `--compare-headless OTHER`; check the engine's own determinism with `--determinism` (same build twice, must match at every checkpoint).
 
+## Replay format
+
+Header `# snatcher-replay v2` (v1 files still load), then `disc sha1=`, `bram sha1=`, `engine`, `cdspeed`, `justifier on|off`, then events. Each event holds until the next one of its kind:
+
+```
+@0x1a2b UCS                pad buttons from this boot frame (U D L R B C A S, - for none)
+g0x1a2b 143,87,in,T        Justifier from this frame: x,y in screen pixels, in|out of the screen, T trigger / S start / TS / -
+```
+
+`scd_headless --replay` connects the Justifier for a v2 replay with `justifier on`. A v1 replay with `justifier on` is refused (exit 4) because it has no gun input. `scd_headless --justifier [--gun F:X,Y,in|out,BTNS ...]` drives the gun directly, with entries in frame order.
+
 ## Checkpoints
 
 `--ckpt-out FILE [--ckpt-every N]` writes one line whenever `$E022`/`$E06C` change and every N frames (default 300):

@@ -54,7 +54,8 @@ public:
     void set_gun_connected(bool on) { gun_connected_ = on; }
     void set_gun(int x, int y, bool inside, uint8_t buttons) { gun_x_ = x; gun_y_ = y; gun_inside_ = inside; gun_buttons_ = buttons; }
 
-    // Replay hooks (run_frame start): play overrides port 1's pad, record logs port 1's pad per emulated frame.
+    // Replay hooks (run_frame start): play overrides port 1's pad (and the gun, for a replay with justifier on); record
+    // logs port 1's pad, and the gun state while the gun is connected, per emulated frame.
     void set_replay_play(const Replay* r) { replay_play_ = r; }
     void set_replay_record(Replay* r) { replay_rec_ = r; }
 
