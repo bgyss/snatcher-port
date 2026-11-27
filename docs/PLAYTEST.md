@@ -62,6 +62,16 @@ A killed session (`ended: null`) is verified up to its last checkpoint. A warnin
 
 Compare two builds with `--compare-headless OTHER`; check the engine's own determinism with `--determinism` (same build twice, must match at every checkpoint).
 
+## Rebuild a replay from an app log
+
+A run from before session recording, or one with `--no-session`, may still have a debug log (`--log`, or `debug.log` in the per-user data directory). Its `[pad]` lines are only approximate: the app sets the pad once per host iteration, which may cover several frames. `tools/playtest/fit_log_replay.py` turns the log into a replay that follows the same route:
+
+```sh
+.venv/bin/python tools/playtest/fit_log_replay.py debug.log --bram bram.bin --headless engine/build/scd_headless --out work/fit
+```
+
+It replays headless and compares the `[game]` state changes and `[cd]` reads with the log. At the first mismatch it tries small edits to the presses before it: shift by up to 8 frames, change the hold, drop a press, then pairs of edits. A fix must also reproduce everything up to the next CD read. It writes `work/fit/fitted.replay` and `edits.txt`, or `partial.replay` if no edit helps. Each trial runs from boot, so a 20000-frame log takes tens of minutes on 8 cores. The backup RAM must be the one the app booted with; the app's `bram.bin` qualifies only if the game did not save during that run. Fit against the build kind the app was (`mise run build` is translated).
+
 ## Replay format
 
 Header `# snatcher-replay v2` (v1 files still load), then `disc sha1=`, `bram sha1=`, `engine`, `cdspeed`, `justifier on|off`, then events. Each event holds until the next one of its kind:
