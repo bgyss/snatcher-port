@@ -193,6 +193,10 @@ bool System::init(std::unique_ptr<Disc> disc, const std::string& save_path, std:
     psg_.reset();
     OPN2_SetChipType(ym3438_mode_ym2612);
     OPN2_Reset(&ym_);
+    main_exec_clock_ = ym_clk_ = 0;
+    ym_sub_ = ym_acc_l_ = ym_acc_r_ = 0;
+    ym_q_.clear();
+    ym_q_head_ = 0;
 
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
@@ -604,6 +608,7 @@ int System::run_main_translated(int cycles) {
     c.bus = &bus;
     c.ipl = &cpu_irq_[kMain];
     int32_t budget = cycles;
+    main_slice_ = cycles;
     main_budget_ = &budget;           // VDP DMA stalls are charged here, also during a single handler instruction
     bool force_one = false;
     while (budget > 0 || force_one) {
@@ -659,6 +664,7 @@ void System::run_cpu(Cpu c, int cycles) {
     refresh_irq(c);
     int used;
     fallback_why_ = translate_ ? Fallback::kNotTranslated : Fallback::kInterpreter;   // whole-slice Musashi runs (no translated program for this CPU)
+    main_executing_ = c == kMain;
 #ifdef SNATCHER_TRANSLATED
 #ifdef SNATCHER_TRANSLATED_MAIN
     if (c == kMain && translate_) used = run_main_translated(budget); else
@@ -667,7 +673,9 @@ void System::run_cpu(Cpu c, int cycles) {
 #else
     used = m68k_execute(budget);
 #endif
+    main_executing_ = false;
     cpu_debt_[c] = used - budget;
+    if (c == kMain) main_exec_clock_ += uint64_t(used);
     if (profile_) ++pc_hist_[c][reg_get(M68K_REG_PC) & 0xFFFFFF];
     if (c == kSub) advance_sub_time(used);
 }
@@ -698,6 +706,7 @@ void System::run_frame() {
         }
         if (line_ < active) vdp_.render_line(line_);
         if (gun_connected_ && gun_inside_ && line_ == gun_y_ && vdp_.hv_latch_enabled()) vdp_.light_pen_hit(gun_x_, line_);
+        ym_sync();                      // the YM up to what Main has executed by the end of this line
         audio_frac_ += double(kSampleRate) / (60.0 * kLines);
         int n = int(audio_frac_);
         audio_frac_ -= n;
@@ -752,7 +761,7 @@ uint32_t System::main_read8(uint32_t a) {
         return p ? *p : 0;
     }
     if (a >= 0xA00000 && a < 0xA10000) {
-        if (a >= 0xA04000 && a < 0xA04004) return OPN2_Read(&ym_, a & 3);
+        if (a >= 0xA04000 && a < 0xA04004) { ym_sync(); return OPN2_Read(&ym_, a & 3); }
         if (a < 0xA02000) return z80_ram_[a & 0x1FFF];
         return 0;
     }
@@ -1029,8 +1038,20 @@ void System::io_write(uint32_t reg, uint8_t v) {
 }
 
 void System::ym_write(int port, uint8_t v) {
+    ym_sync();
+    if ((ym_.write_a | ym_.write_d) & 1) {
+        // The previous write is not latched yet (Nuked keeps one pending write): clock once so this one cannot replace it.
+        // ym_sync keeps the chip in step with Main, so this only happens for writes in back-to-back instructions.
+        if (++ym_collapsed_ <= 20 || std::getenv("SCD_YM_COLLAPSE"))
+            log("[ym] f=%llu line %d write port %d <- %02x before the previous one was latched (pc=%06x) main=%llu ym=%llu\n", (unsigned long long)frames_, line_, port, v, reg_get(M68K_REG_PC) & 0xFFFFFF, (unsigned long long)main_now(), (unsigned long long)ym_clk_);
+        ym_clock_one();
+    }
     ++ym_writes_;
     if (trace_audio_) log("[ym] frame %llu port %d <- %02x\n", (unsigned long long)frames_, port, v);
+    if (!(port & 1)) ym_addr_[port >> 1] = v;
+    else if (port == 1 && (ym_addr_[0] == 0x21 || ym_addr_[0] == 0x2C) && v)
+        // LSI test registers: the game never sets them; bit 7 of $21 turns the status read into test data (busy stuck on)
+        log("[ym] f=%llu test register $%02x <- %02x pc=%06x\n", (unsigned long long)frames_, ym_addr_[0], v, reg_get(M68K_REG_PC) & 0xFFFFFF);
     OPN2_Write(&ym_, uint32_t(port), v);
 }
 
@@ -1537,6 +1558,17 @@ std::string System::state_text() {
         select_cpu(Cpu(i));
         appendf(s, "%s PC=%06x SR=%04x SP=%06x D0=%08x A0=%08x A6=%08x\n", i ? "Sub " : "Main", reg_get(M68K_REG_PC) & 0xFFFFFF,
                 reg_get(M68K_REG_SR), reg_get(M68K_REG_SP) & 0xFFFFFF, reg_get(M68K_REG_D0), reg_get(M68K_REG_A0), reg_get(M68K_REG_A6));
+        // The stack shows where an interrupted handler (an outer V-INT, a BIOS call) was when a hang started.
+        const uint32_t sp = reg_get(M68K_REG_SP) & 0xFFFFFF;
+        const uint8_t* mem = i ? prg_ram_ : main_ram_;
+        const uint32_t base = i ? 0 : 0xFF0000, size = i ? sizeof(prg_ram_) : sizeof(main_ram_);
+        appendf(s, "  stack:");
+        for (uint32_t k = 0; k < 64; k += 2) {
+            uint32_t a = sp + k - base;
+            if (sp < base || a + 1 >= size) break;
+            appendf(s, "%s%04x", (k % 16) ? " " : (k ? "\n         " : " "), mem[a] << 8 | mem[a + 1]);
+        }
+        appendf(s, "\n");
     }
     select_cpu(keep);
     appendf(s, "VDP regs:");
@@ -1544,6 +1576,12 @@ std::string System::state_text() {
     appendf(s, "  ffef02=%02x%02x\n", main_ram_[0xef02], main_ram_[0xef03]);
     appendf(s, "sub_run=%d owner=%d mode1m=%d main_flag=%02x sub_flag=%02x int_mask=%04x ien2=%d prg_bank=%d\n", sub_run_, word_owner_, mode_1m_,
             main_flag_, sub_flag_, int_mask_, ien2_, prg_bank_);
+    {
+        unsigned t21 = 0, t2c = 0;
+        for (int b = 0; b < 8; ++b) { t21 |= unsigned(ym_.mode_test_21[b] != 0) << b; t2c |= unsigned(ym_.mode_test_2c[b] != 0) << b; }
+        appendf(s, "YM2612: busy=%d write_busy=%d busy_cnt=%d status=%02x test21=%02x test2c=%02x writes=%llu\n", ym_.busy, ym_.write_busy,
+                ym_.write_busy_cnt, ym_.status, t21, t2c, (unsigned long long)ym_writes_);
+    }
     appendf(s, "CD: reading=%d lba=%u remaining=%u buf_valid=%d cdda=%d track=%d reads=%llu\n", cdc_reading_, cdc_lba_, cdc_remaining_, cdc_buf_valid_,
             cdda_playing_, cdda_track_, (unsigned long long)cd_reads_);
     s += pcm_.describe();
@@ -1671,13 +1709,17 @@ void System::cdda_fetch() {
 void System::audio_run(int samples) {
     for (int i = 0; i < samples; ++i) {
         // YM2612: 53267 Hz, 24 Nuked clocks per sample.
-        ym_phase_ += 53267.0 / kSampleRate;
+        // YM samples come from ym_sync at the Main clock / 144 (one sample per 24 Nuked clocks of 6 Main cycles each).
+        ym_phase_ += double(kMainPerLine) * kLines * 60.0 / 144.0 / kSampleRate;
         while (ym_phase_ >= 1.0) {
             ym_phase_ -= 1.0;
-            int16_t buf[2] = {0, 0};
-            for (int k = 0; k < 24; ++k) OPN2_Clock(&ym_, buf);
-            ym_l_ = buf[0];
-            ym_r_ = buf[1];
+            // On a momentary underflow (output and Main time differ by a fraction of a sample) keep the last sample:
+            // clocking the chip here would run it ahead of Main and the next writes would see no clocks between them.
+            if (ym_q_head_ < ym_q_.size()) {
+                ym_l_ = ym_q_[ym_q_head_];
+                ym_r_ = ym_q_[ym_q_head_ + 1];
+                ym_q_head_ += 2;
+            }
         }
         pcm_phase_ += 32552.0 / kSampleRate;
         while (pcm_phase_ >= 1.0) {
@@ -1717,6 +1759,40 @@ void System::audio_run(int samples) {
         audio_.push_back(int16_t(std::clamp(l, -32768, 32767)));
         audio_.push_back(int16_t(std::clamp(r, -32768, 32767)));
     }
+    // Keep the queue short: drop what was consumed, and any backlog past a few samples (should not happen: both sides
+    // run off the same clock).
+    if (ym_q_head_) { ym_q_.erase(ym_q_.begin(), ym_q_.begin() + long(ym_q_head_)); ym_q_head_ = 0; }
+    if (ym_q_.size() > 64) ym_q_.erase(ym_q_.begin(), ym_q_.end() - 16);
+}
+
+uint64_t System::main_now() const {
+    // Cycles Main has actually executed (monotonic, unlike the nominal slice start when a slice overran its budget).
+    uint64_t t = main_exec_clock_;
+    // Only inside a Main slice: between slices Musashi's counters still hold the finished slice (cur_ stays kMain
+    // when the Sub is parked in _WAITVSYNC), and counting them again ran the YM a slice ahead.
+    if (main_executing_) {
+        if (main_budget_) t += uint64_t(std::max<int32_t>(0, main_slice_ - *main_budget_));   // translated slice
+        else t += uint64_t(std::max(0, m68k_cycles_run()));                                  // inside m68k_execute
+    }
+    return t;
+}
+
+void System::ym_clock_one() {
+    int16_t buf[2] = {0, 0};
+    OPN2_Clock(&ym_, buf);
+    ym_acc_l_ += buf[0];
+    ym_acc_r_ += buf[1];
+    ++ym_clk_;
+    if (++ym_sub_ == 24) {
+        ym_q_.push_back(ym_acc_l_);
+        ym_q_.push_back(ym_acc_r_);
+        ym_sub_ = ym_acc_l_ = ym_acc_r_ = 0;
+    }
+}
+
+void System::ym_sync() {
+    const uint64_t target = main_now() / 6;
+    while (ym_clk_ < target) ym_clock_one();
 }
 
 }  // namespace scd

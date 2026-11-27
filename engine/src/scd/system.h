@@ -270,7 +270,22 @@ private:
     std::vector<int16_t> audio_;
     double audio_frac_ = 0;
     double ym_phase_ = 0, pcm_phase_ = 0, psg_phase_ = 0;
-    int16_t ym_l_ = 0, ym_r_ = 0, pcm_l_ = 0, pcm_r_ = 0, psg_s_ = 0;
+    // YM2612 runs in step with the Main CPU (one Nuked clock per 6 Main cycles): ym_sync() before every YM access, so a
+    // write is latched before the next one and the busy flag lasts its 32 clocks. Nuked keeps only one pending write;
+    // clocking it once per line merged address/data pairs (a data byte became the register number). Each sample sums
+    // the 24 per-clock outputs (one channel slot per clock).
+    uint64_t main_exec_clock_ = 0;   // Main cycles executed since reset (completed slices)
+    bool main_executing_ = false;    // inside run_cpu(kMain)
+    int32_t main_slice_ = 0;         // budget the translated Main slice started with (main_budget_ counts it down)
+    uint64_t ym_clk_ = 0;
+    int ym_sub_ = 0, ym_acc_l_ = 0, ym_acc_r_ = 0;
+    std::vector<int32_t> ym_q_;      // L,R pairs produced by ym_sync, consumed by audio_run
+    size_t ym_q_head_ = 0;
+    uint64_t main_now() const;
+    void ym_sync();
+    void ym_clock_one();
+    int32_t ym_l_ = 0, ym_r_ = 0;
+    int16_t pcm_l_ = 0, pcm_r_ = 0, psg_s_ = 0;
 
     bool trace_bios_ = false;
     bool comm_log_ = false;
@@ -295,6 +310,8 @@ private:
     uint32_t ovl_image_ = 0;                          // CRC32 of the first 2 KB at $28000 for the current overlay (Task 3)
     bool trace_audio_ = false;
     uint64_t ym_writes_ = 0;
+    uint64_t ym_collapsed_ = 0;
+    uint8_t ym_addr_[2] = {0, 0};   // last register latched on each YM2612 address port (parts I and II)
     uint32_t watch_ = 0, stack_at_ = 0;
     int stack_left_ = 20;
     int trace_cpu_ = -1, trace_left_ = 0;

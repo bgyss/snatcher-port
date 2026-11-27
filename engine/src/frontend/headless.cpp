@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
         uint16_t pad = 0;
         for (auto& p : presses) if (f >= p.frame && f < p.frame + p.hold) pad |= p.buttons;
         if (profile_from >= 0 && f == frames - profile_from) sys.enable_profile(true);
-        sys.set_pad(0, pad);
+        if (replay_path.empty()) sys.set_pad(0, pad);   // a replay sets the pad inside run_frame; setting 0 here first logged a release every frame
         if (justifier && !guns.empty()) {   // --gun: the last entry whose frame has been reached
             GunState g;
             for (auto& gp : guns) if (uint64_t(f) >= gp.frame) g = gp.gun;
